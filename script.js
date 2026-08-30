@@ -276,18 +276,11 @@
 
   function updateColorDot(knot) {
     if (!app.dom.colorDotBtn) return;
+    // 手機那顆是 🎨，不是變色小點 —— 不染色，也不要留下沒有作用的 inline style。
+    // 桌面才是「小點顯示目前顏色」的設計。（Rec 2026-08-30：兩邊嚴格分離）
     if (isMobileView()) {
-      const selected = findKnot(app.selectedKnotId);
-      const selectedColor = getColorByName(selected?.meta?.color);
-      if (selectedColor) {
-        app.dom.colorDotBtn.style.color = selectedColor.hex;
-        return;
-      }
-      if (app.activeDefaultColorName) {
-        const active = getColorByName(app.activeDefaultColorName);
-        app.dom.colorDotBtn.style.color = active ? active.hex : "var(--text-dim)";
-        return;
-      }
+      app.dom.colorDotBtn.style.removeProperty("color");
+      return;
     }
     const color = getColorByName(knot?.meta?.color);
     app.dom.colorDotBtn.style.color = color ? color.hex : "var(--text-dim)";
@@ -341,18 +334,13 @@
       const colorName = dot.dataset.colorName;
       if (!colorName) return;
 
+      // 方案 C（2026-08-30 拍板）：選色 ＝ **上膛**，不是立刻套用。
+      // 桌面本來就是這個流程（選色 → 游標帶色 → 點 knot → 染色 → 自動卸膛），
+      // 手機只是把「帶色的游標」換成「帶色的按鈕」。兩邊同一個心智模型。
       if (isMobileView()) {
         event.preventDefault();
         event.stopPropagation();
-        const selected = findKnot(app.selectedKnotId);
-        if (selected) {
-          applyColorToKnot(selected, colorName);
-        } else {
-          app.activeDefaultColorName = colorName;
-          updateColorDot(null);
-        }
-        document.body.classList.remove("color-palette-open");
-        return;
+        document.body.classList.remove("color-palette-open"); // 選完就收，畫布還給使用者
       }
 
       app.activeColorName = colorName;
@@ -369,6 +357,7 @@
     };
 
     app.dom.colorPalette.addEventListener("dragstart", (event) => {
+      if (isMobileView()) return; // 桌面專屬流程
       const dot = event.target.closest(".palette-dot");
       if (!dot || !event.dataTransfer) return;
       event.dataTransfer.setData("text/plain", dot.dataset.colorName || "");
@@ -464,9 +453,28 @@
     return el;
   }
 
+  // 「上膛」的指示面有兩個：桌面是跟著游標跑的色點，手機沒有游標，
+  // 所以改成把 🎨 換成該顏色的實心點。**同一個 app.activeColorName 狀態**，只是畫在不同地方。
+  function setColorArmedIndicator(colorName) {
+    const btn = app.dom.colorDotBtn;
+    if (!btn) return;
+    const color = getColorByName(colorName);
+    if (!color) {
+      btn.classList.remove("is-armed");
+      btn.style.removeProperty("--armed-color");
+      return;
+    }
+    btn.style.setProperty("--armed-color", color.hex);
+    btn.classList.add("is-armed");
+  }
+
   function showColorCursor(colorName) {
     const color = getColorByName(colorName);
     if (!color) return;
+    if (isMobileView()) {
+      setColorArmedIndicator(colorName);
+      return;
+    }
     const el = ensureColorCursor();
     el.style.background = color.hex;
     el.style.display = "block";
@@ -476,6 +484,7 @@
     app.activeColorName = null;
     document.body.classList.remove("is-color-painting");
     if (app.colorCursorEl) app.colorCursorEl.style.display = "none";
+    setColorArmedIndicator(null);
   }
 
   function applyColorToKnot(knot, colorName) {
@@ -689,6 +698,88 @@
     };
   }
 
+  // ── 手機 tray：不排網格 ─────────────────────────────
+  // [+] 每顆落在 tray 內隨機、且與現有 knot 不重疊的位置；界內保證。
+  const TRAY_GAP = 6;
+  const TRAY_SPOT_TRIES = 300;
+
+  function isMobileTray() {
+    return window.matchMedia("(max-width: 720px)").matches;
+  }
+
+  // 實際渲染尺寸優先（CSS 有 width:192px !important，算不出來），量不到才退回常數
+  function getTrayKnotBox(knotId) {
+    const el = app.dom.trayKnotLayer
+      ? app.dom.trayKnotLayer.querySelector('.knot[data-knot-id="' + knotId + '"]')
+      : null;
+    if (el) {
+      const r = el.getBoundingClientRect();
+      if (r.width && r.height) return { w: r.width, h: r.height };
+    }
+    const layout = knotId ? getKnotLayout(app.state, knotId) : null;
+    return {
+      w: (layout && layout.width) || STASH_KNOT_SIZE.width,
+      h: (layout && layout.height) || STASH_KNOT_SIZE.height
+    };
+  }
+
+  // 還沒建出來的新 knot：量現有任一顆當樣本
+  function getTrayNewKnotBox() {
+    const el = app.dom.trayKnotLayer
+      ? app.dom.trayKnotLayer.querySelector(".knot")
+      : null;
+    if (el) {
+      const r = el.getBoundingClientRect();
+      if (r.width && r.height) return { w: r.width, h: r.height };
+    }
+    return { w: 192, h: 40 };
+  }
+
+  function boxesOverlap(x, y, w, h, t) {
+    return (
+      x < t.x + t.w + TRAY_GAP &&
+      x + w + TRAY_GAP > t.x &&
+      y < t.y + t.h + TRAY_GAP &&
+      y + h + TRAY_GAP > t.y
+    );
+  }
+
+  // placed 已放好的格子；回傳界內、盡量不重疊的一個點。
+  // tray 真的塞滿時放不出零重疊 —— 那就回傳重疊最少的，但**永遠在界內**。
+  function pickTraySpot(placed, w, h, maxX, maxY) {
+    let best = null;
+    for (let i = 0; i < TRAY_SPOT_TRIES; i++) {
+      const x = Math.random() * maxX;
+      const y = Math.random() * maxY;
+      let n = 0;
+      for (const t of placed) if (boxesOverlap(x, y, w, h, t)) n++;
+      if (n === 0) return { x, y };
+      if (!best || n < best.n) best = { x, y, n };
+    }
+    return best ? { x: best.x, y: best.y } : { x: 0, y: 0 };
+  }
+
+  function getTraySpotForNew() {
+    const layer = app.dom.trayKnotLayer;
+    const box = getTrayNewKnotBox();
+    if (!layer) return { x: 0, y: 0 };
+    const rect = layer.getBoundingClientRect();
+    if (!rect.width || !rect.height) return { x: 0, y: 0 };
+
+    const placed = app.state.knots.filter(isTrayKnot).map((k) => {
+      const l = getKnotLayout(app.state, k.id);
+      const b = getTrayKnotBox(k.id);
+      return { x: l.x, y: l.y, w: b.w, h: b.h };
+    });
+    return pickTraySpot(
+      placed,
+      box.w,
+      box.h,
+      Math.max(0, rect.width - box.w),
+      Math.max(0, rect.height - box.h)
+    );
+  }
+
   function clampZoom(value) {
     return Math.min(1.6, Math.max(0.5, Number(value.toFixed(2))));
   }
@@ -703,10 +794,14 @@
       btn.textContent = labels[i];
       btn.title = "New knot in tray";
       btn.addEventListener("click", () => {
+        // 手機：隨機不重疊。桌面：維持原本的堆疊（Rec 只指定手機版）
+        const spot = isMobileTray()
+          ? getTraySpotForNew()
+          : { x: 8, y: countTrayKnots() * 36 };
         createKnot({
           contentExpanded: true,
-          x: 8,
-          y: countTrayKnots() * 36,
+          x: spot.x,
+          y: spot.y,
           width: STASH_KNOT_SIZE.width,
           location: "tray"
         });
@@ -769,7 +864,9 @@
         });
       }
 
-      layer.addEventListener("mousedown", (event) => {
+      // pointerdown 而非 mousedown：滑鼠一樣會派送 pointer 事件，
+      // 但觸控裝置**只有** pointer 事件 —— 這是手機上 tray 內拖得動的唯一條件。
+      layer.addEventListener("pointerdown", (event) => {
         if (event.button !== 0) return;
         if (event.target.closest(".port")) return;
         if (event.target.closest(".knot-edit-btn")) {
@@ -862,8 +959,9 @@
         };
 
         const onUp = () => {
-          window.removeEventListener("mousemove", onMove);
-          window.removeEventListener("mouseup", onUp);
+          window.removeEventListener("pointermove", onMove);
+          window.removeEventListener("pointerup", onUp);
+          window.removeEventListener("pointercancel", onUp);
 
           app.dragKnot = null;
           app.dragKnotLayer = null;
@@ -874,21 +972,37 @@
           render();
         };
 
-        window.addEventListener("mousemove", onMove);
-        window.addEventListener("mouseup", onUp);
+        // 不用 setPointerCapture：render() 每次都 replaceChildren，
+        // 被捕獲的元素會在拖曳中途被換掉，capture 跟著失效。掛 window 才穩。
+        window.addEventListener("pointermove", onMove);
+        window.addEventListener("pointerup", onUp);
+        window.addEventListener("pointercancel", onUp);
       });
 
       layer.addEventListener("click", (event) => {
         if (app.activeColorName) {
           const targetKnotEl = event.target.closest(".knot");
           if (targetKnotEl) {
-            event.preventDefault();
-            event.stopPropagation();
-            const paintKnot = findKnot(targetKnotEl.dataset.knotId);
+            // id 要在染色前抓：applyColorToKnot() 會 render()，
+            // 之後 event.target 已經是被換掉的舊節點，closest() 不能再信。
+            const paintId = targetKnotEl.dataset.knotId;
+            const paintKnot = findKnot(paintId);
             if (paintKnot) {
               applyColorToKnot(paintKnot, app.activeColorName);
             }
             clearColorPaintMode();
+
+            if (!isMobileView()) {
+              // 桌面：這一下只用來染色，吃掉。
+              event.preventDefault();
+              event.stopPropagation();
+              return;
+            }
+
+            // 手機：染完順手把它選起來，使用者可以直接接著輸入。
+            // （只選中、不 focus —— 自動彈鍵盤比沒選中更煩。）
+            app.selectedKnotId = paintId;
+            render();
             return;
           }
         }
@@ -1379,26 +1493,29 @@
 
     if (!trayKnotIds.length) return;
 
-    const minY = 0;
-    const visualWidth = 192;
-    const visualHeight = 40;
-    const maxX = Math.max(0, trayRect.width - visualWidth);
-    const maxY = Math.max(0, trayRect.height - visualHeight);
-
-    const hasOverflow = trayKnotIds.some((knotId) => {
-      const layout = getKnotLayout(app.state, knotId);
-      return layout.x < 0 || layout.x > maxX || layout.y < minY || layout.y > maxY;
-    });
-
-    if (!hasOverflow) return;
-
+    // 逐顆檢查：出界、或跟已放好的重疊 → 重抽一個位置。
+    // 沒問題的那些**原地不動**（否則使用者自己拖好的位置每次開抽屜都會被洗掉）。
+    const placed = [];
     for (const knotId of trayKnotIds) {
       const layout = getKnotLayout(app.state, knotId);
-      setKnotLayout(app.state, knotId, {
-        ...layout,
-        x: maxX > 0 ? Math.random() * maxX : 0,
-        y: maxY > minY ? minY + Math.random() * (maxY - minY) : 0
-      });
+      const box = getTrayKnotBox(knotId);
+      const maxX = Math.max(0, trayRect.width - box.w);
+      const maxY = Math.max(0, trayRect.height - box.h);
+
+      const outside =
+        layout.x < 0 || layout.x > maxX || layout.y < 0 || layout.y > maxY;
+      const collides = placed.some((t) =>
+        boxesOverlap(layout.x, layout.y, box.w, box.h, t)
+      );
+
+      if (!outside && !collides) {
+        placed.push({ x: layout.x, y: layout.y, w: box.w, h: box.h });
+        continue;
+      }
+
+      const spot = pickTraySpot(placed, box.w, box.h, maxX, maxY);
+      setKnotLayout(app.state, knotId, { ...layout, x: spot.x, y: spot.y });
+      placed.push({ x: spot.x, y: spot.y, w: box.w, h: box.h });
     }
   }
 
@@ -1424,18 +1541,15 @@
         if (color.name === "ruvia") {
           knotEl.style.setProperty("--knot-bg-accent", "var(--knot-bg)");
           knotEl.style.backgroundColor = "var(--knot-bg)";
-          knotEl.style.borderColor = "var(--line-soft)";
         } else {
           knotEl.style.setProperty("--knot-bg-accent", `${color.hex}55`);
           knotEl.style.backgroundColor = `${color.hex}55`;
-          knotEl.style.borderColor = color.hex;
         }
       } else {
         delete knotEl.dataset.color;
         knotEl.style.removeProperty("--knot-accent");
         knotEl.style.removeProperty("--knot-bg-accent");
         knotEl.style.removeProperty("background-color");
-        knotEl.style.removeProperty("border-color");
       }
       knotEl.style.left = `${layout.x}px`;
       knotEl.style.top = `${layout.y}px`;
@@ -2249,66 +2363,84 @@
     if (!menu) return state;
 
     const uiOpen = { contentExpanded: true };
-    const specs = [
-      {
-        id: "demo_a",
-        title: "knot-a",
-        text: "messy thought\n\n三叉：\n\n再长：",
-        layout: { x: 52, y: 88, width: 148, height: 92, zIndex: 1 }
-      },
-      {
-        id: "demo_b",
-        title: "knot-b",
-        text: "system model",
-        layout: { x: 268, y: 24, width: 136, height: 46, zIndex: 2 }
-      },
-      {
-        id: "demo_c",
-        title: "knot-c",
-        text: "writing surface",
-        layout: { x: 268, y: 104, width: 136, height: 46, zIndex: 3 }
-      },
-      {
-        id: "demo_d",
-        title: "knot-d",
-        text: "execution path",
-        layout: { x: 268, y: 184, width: 136, height: 46, zIndex: 4 }
-      },
-      {
-        id: "demo_e",
-        title: "knot-e",
-        text: "rules / relations",
-        layout: { x: 468, y: 52, width: 136, height: 46, zIndex: 5 }
-      },
-      {
-        id: "demo_f",
-        title: "knot-f",
-        text: "prompt / text",
-        layout: { x: 468, y: 112, width: 136, height: 46, zIndex: 6 }
-      },
-      {
-        id: "demo_g",
-        title: "knot-g",
-        text: "next action",
-        layout: { x: 468, y: 172, width: 136, height: 46, zIndex: 7 }
-      }
+
+    // 預設注入 ＝ 機器學習入門最常畫的那張圖：「第一個模型該挑哪個」。
+    // 選它的理由：那是真的**樹**（一路問下去分叉），不是清單也不是流程圖 ——
+    // 打開就看得出這個工具是拿來幹嘛的。全英文（Rec 2026-08-30）。
+    // 標題沿用 knot-a / knot-a-a / knot-a-a-a 的階層命名（docs/knot-title-vs-id.md）。
+    //
+    // ⚠️ 內容只有一份。**桌機與手機分岔的只有座標**，
+    //    knot、edge、title、文字全部相同 —— 所以手機匯出的 .root 在桌機打開仍是同一棵樹。
+    const CONTENT = [
+      { id: "demo_a",     title: "knot-a",     text: "pick a first model\n\nwhat does the data look like?" },
+      { id: "demo_a_a",   title: "knot-a-a",   text: "labeled data\n-> supervised" },
+      { id: "demo_a_a_a", title: "knot-a-a-a", text: "predict a class\nlogistic reg / random forest" },
+      { id: "demo_a_a_b", title: "knot-a-a-b", text: "predict a number\nlinear reg / gradient boosting" },
+      { id: "demo_a_b",   title: "knot-a-b",   text: "no labels\n-> unsupervised" },
+      { id: "demo_a_b_a", title: "knot-a-b-a", text: "group similar rows\nk-means / DBSCAN" },
+      { id: "demo_a_b_b", title: "knot-a-b-b", text: "too many columns\nPCA / t-SNE" },
+      { id: "demo_a_c",   title: "knot-a-c",   text: "split first\ntrain / val / test" }
     ];
 
-    for (const s of specs) {
+    // 桌機：左→右三欄，橫著長 —— 跟 Ruvia 的 port 方向（左/右）一致。
+    const LAYOUT_WIDE = {
+      demo_a:     { x: 40,  y: 190, width: 164, height: 86 },
+      demo_a_a:   { x: 248, y: 54,  width: 152, height: 54 },
+      demo_a_b:   { x: 248, y: 234, width: 152, height: 54 },
+      demo_a_c:   { x: 248, y: 330, width: 152, height: 54 },
+      demo_a_a_a: { x: 452, y: 10,  width: 190, height: 62 },
+      demo_a_a_b: { x: 452, y: 90,  width: 190, height: 62 },
+      demo_a_b_a: { x: 452, y: 190, width: 190, height: 62 },
+      demo_a_b_b: { x: 452, y: 270, width: 190, height: 62 }
+    };
+
+    // 手機：**縮排大綱**（像檔案樹），往下長。
+    // 為什麼不是把桌機那張縮小：knot 一律正規化成 96 世界單位寬，有效 zoom 固定 1.5，
+    // 390px 螢幕只有 260 世界單位可用 —— 兩欄（192＋間距）塞得下，三欄（288）塞不下。
+    // 所以橫向排不開，只能改成每層縮排 56、共用縱軸。手機縱向空間有 519 單位，綽綽有餘。
+    // ⚠️ 順序有講究：`demo_a_c`（split first）排在根的**正下方第一個**。
+    //    Ruvia 的 port 在左右兩側，邊是水平貝茲 —— 子節點在正下方時，線必須繞一大圈。
+    //    根的最後一個子節點離根越遠，那條繞線越長越髒。把最短的那支提前，
+    //    根的最長邊從 362 縮到 270 個世界單位。而且「先切資料」本來就該讀在最前面。
+    const LAYOUT_TALL = {
+      demo_a:     { x: 8,   y: 10,  width: 96, height: 51 },
+      demo_a_c:   { x: 64,  y: 76,  width: 96, height: 31 },
+      demo_a_a:   { x: 64,  y: 122, width: 96, height: 31 },
+      demo_a_a_a: { x: 120, y: 168, width: 96, height: 41 },
+      demo_a_a_b: { x: 120, y: 224, width: 96, height: 41 },
+      demo_a_b:   { x: 64,  y: 280, width: 96, height: 31 },
+      demo_a_b_a: { x: 120, y: 326, width: 96, height: 31 },
+      demo_a_b_b: { x: 120, y: 372, width: 96, height: 31 }
+    };
+
+    const layoutTable = isMobileView() ? LAYOUT_TALL : LAYOUT_WIDE;
+
+    let z = 1;
+    for (const item of CONTENT) {
       state.knots.push({
-        id: s.id,
-        title: s.title,
-        content: { text: s.text },
+        id: item.id,
+        title: item.title,
+        content: { text: item.text },
         meta: { ui: { ...uiOpen } }
       });
-      addKnotToMenuProjection(state, menu.id, s.id);
-      setKnotLayout(state, s.id, s.layout);
+      addKnotToMenuProjection(state, menu.id, item.id);
+      setKnotLayout(state, item.id, { ...layoutTable[item.id], zIndex: z++ });
     }
 
-    const hub = "demo_a";
-    for (const leaf of ["demo_b", "demo_c", "demo_d", "demo_e", "demo_f", "demo_g"]) {
-      ensureEdge(state, hub, leaf, "link");
+    // 真的分叉：root -> 三支，其中兩支各自再分兩支。
+    const links = [
+      ["demo_a", "demo_a_a"],
+      ["demo_a", "demo_a_b"],
+      ["demo_a", "demo_a_c"],
+      ["demo_a_a", "demo_a_a_a"],
+      ["demo_a_a", "demo_a_a_b"],
+      ["demo_a_b", "demo_a_b_a"],
+      ["demo_a_b", "demo_a_b_b"]
+    ];
+    for (const [from, to] of links) {
+      ensureEdge(state, from, to, "link");
     }
+
 
     touchDocumentUpdated(state);
     syncHierarchyFiles(state);

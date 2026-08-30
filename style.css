@@ -85,59 +85,20 @@ textarea {
   flex-direction: column;
 }
 
-/* toolbar: almost no presence */
+/* toolbar：四顆按鈕已搬進 tray，這裡只剩隱藏的 title-wrap。
+   ⚠️ 這個容器就是「什麼都變淡」的兇手：opacity 0.08 會**再乘**一次到
+   已經帶 alpha 的字色上（--ctrl-fg .42 × .08 = .0336 → 對白底 1.08:1，
+   等於不存在）。空了就塌掉，別再讓任何東西掉進來。 */
 .toolbar {
-  height: 16px;
+  height: 0;
   padding: 0;
   border-bottom: 0;
   background: transparent;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 0;
-  opacity: 0.08;
-  user-select: none;
-}
-
-.toolbar:hover {
-  opacity: 0.22;
+  overflow: hidden;
 }
 
 .title-wrap {
   display: none;
-}
-
-.toolbar-actions {
-  display: flex;
-  align-items: center;
-  gap: 0;
-  margin-left: auto;
-}
-
-.tool-btn {
-  height: 12px;
-  min-width: 0;
-  padding: 0 3px;
-  border: 0;
-  background: transparent;
-  color: var(--ctrl-fg);
-  border-radius: 0;
-  cursor: pointer;
-  font-family: var(--font-ui);
-  font-size: var(--ctrl-font);
-  line-height: 12px;
-}
-
-.tool-btn:hover,
-.tool-btn:focus-visible {
-  color: var(--red);
-  outline: none;
-}
-
-.tool-btn.danger:hover,
-.tool-btn.danger:focus-visible {
-  color: var(--red);
-  background: transparent;
 }
 
 .workspace {
@@ -570,84 +531,99 @@ body.white-mode .knot.is-selected {
 .tray-pane {
   grid-column: 2;
   grid-row: 1;
-  background: transparent;
+  /* 上／右／下 各 5px，且是**對視窗**對稱。
+     原本掛在 workspace 網格裡，上緣會被 16px 的 toolbar 往下推 →
+     實際變成上 21px、下 5px，肉眼看得出來歪。改 fixed 脫離網格；
+     grid-template-columns 的軌道寬是寫死的，所以畫布仍然不會跑到 tray 底下。 */
+  position: fixed;
+  top: 5px;
+  right: 5px;
+  bottom: 5px;
+  width: calc(468px * 0.7 - 5px);
+  margin: 0;
   min-width: 0;
-  background: rgba(0, 0, 0, 0.015);
-  padding: 13px 8px 8px 13px;
-  position: relative;
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.05);
+  /* 上內距收到 6px：燈泡列要貼 tray 內最頂邊 */
+  padding: 6px 8px 8px 8px;
   z-index: 2;
   pointer-events: auto;
+  /* column flex：燈泡列與 template 列各佔自然高，剩下全給 knot 層。
+     取代原本 .tray-knot-layer 的 top: 52px —— 那個數字是巧合不是設計。 */
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
 }
 
+/* 高度＝tray 扣掉上面兩列之後剩下的全部，由 flex 撐出來。
+   ⚠️ 不要再寫回 top: <數字>。 */
 .tray-knot-layer {
-  position: absolute;
-  left: 0;
-  right: 0;
-  top: 52px;
-  bottom: 0;
+  position: relative;
+  flex: 1;
+  min-height: 0;
   z-index: 2;
   pointer-events: auto;
 }
 
+/* 無外邊線：底色統一由 .tray-pane 出，這層只留給 is-active */
 .tray-pane::before {
   content: "";
   position: absolute;
   inset: 0;
-  border-left: 1px solid rgba(0, 0, 0, 0.08);
-  background: rgba(0, 0, 0, 0.01);
+  border-radius: inherit;
+  background: transparent;
   pointer-events: none;
 }
 
+/* 拖曳落點回饋也不畫線，改用既有的 --port-bg 淡紅底 */
 .tray-pane.is-active::before {
-  border-left-color: var(--red-soft);
+  background: var(--port-bg);
 }
 
-.tray-title {
-  position: relative;
-  z-index: 1;
-  font-size: 20px;
-  font-family: var(--font-ui);
-  color: var(--text-dim);
-  margin: 0;
-  height: auto;
-  text-transform: lowercase;
-  user-select: none;
-  letter-spacing: 0;
-}
-
-.tray-head {
+/* ── 燈泡按鈕 · Ruvia 變體 ──────────────────────────────
+   正本：sov/cyc/design-modules/燈泡按鈕模組.md
+   Rec 2026-08-30 指定的在地改寫，**只借尺寸**：
+     借：font-size 10px / line-height 1 / padding 2px 4px 0 4px / radius 6px / gap 4px
+     不借：藍框藍字、1px 外框、is-on 黑填充（Ruvia 這四顆全是點擊式，沒有持久態）
+     換成：淡透明黑底、無框；hover／按下＝純紅字
+   ⚠️ 模組的反規則有「不加填色背景」，這一條是 Rec 明示的專案級豁免。 */
+.bulb-row {
   position: relative;
   z-index: 4;
-  pointer-events: none;
   display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
+  flex-wrap: wrap;
+  align-items: center;
   gap: 4px;
+  font-size: 10px;
+  line-height: 1;
+  max-width: 100%;
   margin: 0 0 10px 0;
+  /* 面板底不吃觸控，只有鈕本體吃 */
+  pointer-events: none;
 }
 
-.tray-actions {
-  display: inline-flex;
-  gap: 3px;
-  pointer-events: auto;
-}
-
-.tray-action-btn {
-  height: 30px;
-  padding: 0 5px;
+.bulb {
+  box-sizing: border-box;
+  display: inline-block;
+  margin: 0;
   border: 0;
-  background: transparent;
-  color: var(--text-dim);
-  font-size: 20px;
-  line-height: 30px;
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.08);
+  color: rgba(0, 0, 0, 0.62);
   font-family: var(--font-ui);
+  font-size: 10px;
+  line-height: 1;
+  /* 上 2 下 0 ＝ Courier 大寫偏高的視覺置中補償（模組不變量：垂直總量 2px、左右各 4px）*/
+  padding: 2px 4px 0 4px;
   cursor: pointer;
   pointer-events: auto;
 }
 
-.tray-action-btn:hover,
-.tray-action-btn:focus-visible {
-  color: var(--red);
+/* 點擊式：hover／按下都只是換成純紅，不填黑、不保持 */
+.bulb:hover,
+.bulb:focus-visible,
+.bulb:active {
+  color: #ff0000;
   outline: none;
 }
 
@@ -697,6 +673,8 @@ body.white-mode .knot.is-selected {
 #trayKnotLayer .knot {
   width: 192px !important;
   min-width: 144px;
+  /* 觸控拖曳：不讓瀏覽器把手勢當成捲動搶走 */
+  touch-action: none;
 }
 
 #trayKnotLayer .knot-title,
@@ -778,14 +756,24 @@ body.white-mode .knot.is-selected {
   padding: 0;
   border: 0;
   border-radius: 3px;
-  background: rgba(110, 110, 110, 0.22);
-  backdrop-filter: blur(2px);
-  -webkit-backdrop-filter: blur(2px);
+  /* 調色盤是拿來**看顏色**的：底透光會讓下面的畫布串進色點，選出來的跟看到的不一樣。
+     這一層刻意不走 alpha 語彙，給接近實色的底 ＋ 毛玻璃。 */
+  background: rgba(250, 250, 250, 0.92);
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.06);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
 }
 
-.color-controls:hover .color-palette,
-.color-palette:hover {
-  display: grid;
+/* ⚠️ 桌面專屬。**必須**關在 min-width 裡，不能只靠手機端寫一條 display:none 蓋它 ——
+   `.color-controls:hover .color-palette` 特異度 (0,3,0) 比
+   `body.color-palette-open .color-palette` 的 (0,2,1) 高，蓋不過去。
+   而觸控裝置點一下就會停在 :hover，於是「點開調色盤」永遠被這條打回 none：
+   這就是手機那顆點不能用的真正原因。 */
+@media (min-width: 721px) {
+  .color-controls:hover .color-palette,
+  .color-palette:hover {
+    display: grid;
+  }
 }
 
 .palette-dot {
@@ -811,8 +799,11 @@ body.white-mode .knot.is-selected {
   background: transparent;
 }
 
-body.is-color-dragging .color-palette {
-  display: grid;
+/* 拖曳上色同樣是桌面流程（觸控沒有 HTML5 drag） */
+@media (min-width: 721px) {
+  body.is-color-dragging .color-palette {
+    display: grid;
+  }
 }
 
 .color-cursor {
@@ -836,14 +827,14 @@ body.is-color-painting .knot {
 
 .knot[data-color] {
   background: var(--knot-bg-accent, var(--knot-bg));
-  border-color: var(--knot-accent, var(--line-soft));
+  border-color: var(--line-soft);
   color: var(--text);
 }
 
 .knot[data-color]:hover,
 .knot[data-color].is-selected {
   background: var(--knot-bg-accent, var(--knot-bg-hover));
-  border-color: var(--knot-accent, transparent);
+  border-color: var(--line-soft);
 }
 
 .knot[data-color] .knot-title:focus,
@@ -903,10 +894,12 @@ body.white-mode .zoom-btn {
   padding: 2px 3px;
   border: 1px solid rgba(190, 130, 145, 0.28);
   border-radius: 0;
-  background: rgba(255, 245, 248, 0.78);
+  /* .78 幾乎是實色，跟旁邊 .16 的鈕不是同一套語彙。降到 .52 走真毛玻璃：
+     alpha 讓得越多，blur 就要給越多，否則底下的畫布會把文字吃掉。 */
+  background: rgba(255, 245, 248, 0.52);
   box-shadow: 0 0 0 1px rgba(255, 210, 220, 0.12) inset;
-  backdrop-filter: blur(2px);
-  -webkit-backdrop-filter: blur(2px);
+  backdrop-filter: blur(10px) saturate(1.2);
+  -webkit-backdrop-filter: blur(10px) saturate(1.2);
 }
 
 .menu-drawer-toggle {
@@ -1058,28 +1051,49 @@ body.tray-collapsed .tray-collapse-btn {
 }
 
 @media (max-width: 720px) {
+  /* 底列唯一度量來源：四顆的位置全部由這幾個值算出來，
+     不再逐顆手調 bottom（原本是 10 / 5 / 8 / 8，所以永遠對不齊）。 */
+  :root {
+    --mb-size: 38px;
+    --mb-gap: 8px;
+    --mb-edge: 10px;
+    --mb-bottom: calc(var(--mb-edge) + env(safe-area-inset-bottom, 0px));
+    --mb-btn-bg: rgba(0, 0, 0, 0.1);
+  }
+
   .workspace {
     grid-template-columns: 1fr;
   }
 
+  /* 下屏的淡透明框；上下收合，無動畫。
+     ⚠️ 底色不能用 rgba(255,255,255,.92) —— 白底站上等於沒有框，
+        跟桌面同走淡透明黑。 */
   .tray-pane {
     position: fixed;
-    right: 0;
-    bottom: 0;
+    left: 5px;
+    right: 5px;
+    /* 排在圓鈕列**上面**，不再壓住那一排 */
+    bottom: calc(var(--mb-bottom) + var(--mb-size) + var(--mb-gap));
     top: auto;
-    width: 80vw;
-    height: 30vh;
-    transform: translateX(100%);
+    width: auto;
+    max-width: none;
+    height: 25vh;
+    margin: 0;
+    border-radius: 6px;
+    /* 收起時要整塊出畫：自身高度 ＋ 底下那段留給圓鈕的距離 */
+    transform: translateY(
+      calc(100% + var(--mb-bottom) + var(--mb-size) + var(--mb-gap))
+    );
     transition: none;
     z-index: 10020;
-    background: rgba(255, 255, 255, 0.92);
+    background: rgba(0, 0, 0, 0.05);
     overflow: hidden;
     backdrop-filter: blur(2px);
     -webkit-backdrop-filter: blur(2px);
   }
 
   body.tray-drawer-open .tray-pane {
-    transform: translateX(0);
+    transform: none;
   }
 
   .canvas-pane {
@@ -1088,48 +1102,74 @@ body.tray-collapsed .tray-collapse-btn {
   }
 
   body.has-menus .menu-drawer-toggle {
-    display: block;
+    display: flex;
+    align-items: center;
+    justify-content: center;
     position: fixed;
-    left: 10px;
-    bottom: 10px;
-    z-index: 10001;
-    width: auto;
-    height: auto;
+    left: var(--mb-edge);
+    bottom: var(--mb-bottom);
+    z-index: 10100;
+    width: var(--mb-size);
+    height: var(--mb-size);
     padding: 0;
     border: 0;
-    background: transparent;
+    border-radius: 50%;
+    /* 底色走原本 𓏢 的 magenta。.16 是量出來的：
+       跟中性鈕 rgba(0,0,0,.10)（對白底 1.254:1）同一個視覺重量，整排才齊。 */
+    background: rgba(255, 0, 255, 0.16);
+    backdrop-filter: blur(4px);
+    -webkit-backdrop-filter: blur(4px);
+    /* ⚠️ 必須是實色。彩色 emoji 會吃 color 的 alpha —— 換成帶 alpha 的 token
+       會讓 🪉 整顆變半透明（見 .color-dot-btn::before 的註）。 */
     color: #ff00ff;
     font-family: var(--font-ui);
     font-size: 18px;
     line-height: 1;
     cursor: pointer;
+    /* 原本有 padding-top:12px（＝向下適正 6px），那是為 𓏢 的字面重心偏高做的。
+       2026-08-30 換成 🪉 emoji 後前提消失 —— emoji 走標準字面度量、flex 置中即正，
+       留著只會無故偏低。要再適正就把 padding-top 加回來（12px ＝ 下移 6px）。 */
   }
 
+  /* pack 選單要壓在 tray（10020）上面。
+     ⚠️ 這條規則本來就有一個 z-index: 10000 寫在最後 —— 我上一輪在上面補 10030
+     被它覆蓋掉了（同規則後者勝），所以「已經改好」其實沒生效。
+     現在只留一個宣告。 */
   body.has-menus #menu-panel {
     display: none;
     position: fixed;
-    left: 10px;
-    bottom: 34px;
+    z-index: 10040;
+    left: var(--mb-edge);
+    bottom: calc(var(--mb-bottom) + var(--mb-size) + var(--mb-gap));
     width: 158px;
     max-height: 42vh;
     overflow-y: auto;
-    z-index: 10000;
   }
 
   body.has-menus.menu-drawer-open #menu-panel {
     display: block;
   }
 
+  /* 🗃️：淡透明底框，色走通用色卡的系統棕橙 #F0520A（Rec 2026-08-29 裁定）。
+     .16 是色卡自己的透明階（.08/.16/.22）中間那級，量出來也剛好
+     跟中性鈕 rgba(0,0,0,.10) 同一個視覺重量。 */
   .tray-drawer-toggle {
-    display: block;
+    display: flex;
+    align-items: center;
+    justify-content: center;
     position: fixed;
-    right: 10px;
-    bottom: 8px;
-    z-index: 10080;
+    right: var(--mb-edge);
+    bottom: var(--mb-bottom);
+    z-index: 10100;
+    width: var(--mb-size);
+    height: var(--mb-size);
     padding: 0;
     border: 0;
-    background: transparent;
-    color: var(--red);
+    border-radius: 50%;
+    background: rgba(240, 82, 10, 0.16);
+    backdrop-filter: blur(4px);
+    -webkit-backdrop-filter: blur(4px);
+    color: #F0520A;
     font-family: var(--font-ui);
     font-size: 18px;
     line-height: 1;
@@ -1138,25 +1178,32 @@ body.tray-collapsed .tray-collapse-btn {
 
   .tray-drawer-toggle:hover,
   .tray-drawer-toggle:focus-visible {
-    color: var(--red);
+    background: rgba(240, 82, 10, 0.16);
+    color: #F0520A;
     outline: none;
   }
 
-  .toolbar {
-    height: 14px;
-  }
-
-  .toolbar-actions {
-    opacity: 0.35;
-  }
-
-  .tool-btn {
-    font-size: 7px;
-    padding: 0 2px;
-  }
-
   .zoom-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: var(--mb-size);
+    height: var(--mb-size);
+    padding: 0;
+    border-radius: 50%;
+    background: var(--mb-btn-bg);
+    backdrop-filter: blur(4px);
+    -webkit-backdrop-filter: blur(4px);
     font-size: 24px;
+  }
+
+  /* 手機沒有 hover：觸控點完會**停在** :hover，基礎規則那個 `color: var(--red)`
+     會卡成紅色不退。這裡把 hover 壓回 idle 的樣子 —— 回饋一律交給 :active。
+     （同一個病灶的另一個版本見 .color-palette 的 min-width 註解） */
+  .zoom-btn:hover,
+  .zoom-btn:focus-visible {
+    background: var(--mb-btn-bg);
+    color: rgba(0, 0, 0, 0.78);
   }
 
   .floating-ui {
@@ -1164,25 +1211,61 @@ body.tray-collapsed .tray-collapse-btn {
   }
 
   .zoom-controls {
-    right: 31px;
-    bottom: 5px;
+    right: calc(var(--mb-edge) + var(--mb-size) + var(--mb-gap));
+    bottom: var(--mb-bottom);
+    gap: var(--mb-gap);
     z-index: 10070;
   }
 
   .color-controls {
-    right: 92px;
-    bottom: 8px;
+    /* ◱ 一格 ＋ zoom 兩格 ＝ 往左第 4 格 */
+    right: calc(var(--mb-edge) + (var(--mb-size) + var(--mb-gap)) * 3);
+    bottom: var(--mb-bottom);
     z-index: 10090;
   }
 
+  /* 手機不做「變色小點」（沒有 hover，點了也讀不出狀態）——換成 🎨。
+     ● 留在 HTML 給桌面用，這裡用 font-size:0 藏掉、::before 出 🎨。 */
   .color-dot-btn {
-    font-size: 22px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: var(--mb-size);
+    height: var(--mb-size);
+    padding: 0;
+    border-radius: 50%;
+    background: var(--mb-btn-bg);
+    backdrop-filter: blur(4px);
+    -webkit-backdrop-filter: blur(4px);
+    font-size: 0;
+  }
+
+  /* 上膛（選了色、還沒染）：🎨 換成該顏色的實心點 —— 這是桌面「帶色游標」的觸控版指示面 */
+  .color-dot-btn.is-armed::before {
+    content: "";
+    width: 18px;
+    height: 18px;
+    border-radius: 50%;
+    background: var(--armed-color, #000);
+    box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.18);
+  }
+
+  .color-dot-btn::before {
+    content: "🎨";
+    font-size: 18px;
+    line-height: 1;
+    /* ⚠️ 彩色 emoji 會吃 `color` 的 **alpha**。這顆繼承的是
+       `.color-dot-btn { color: var(--text-dim) }` ＝ rgba(28,28,28,.22)，
+       於是 🎨 被畫成 22% 不透明度 —— 實測中央飽和度 21 vs 正常 95。
+       這就是「沒點時看起來透明化」的成因（hover 時色變成實色紅才恢復）。
+       給一個**不透明**的 color 就好；彩色 emoji 只吃 alpha，色相不影響。 */
+    color: #000;
   }
 
   .color-palette {
     display: none;
     right: 0;
-    bottom: 26px;
+    bottom: calc(100% + var(--mb-gap));
     width: 105px;
     grid-template-columns: repeat(5, 21px);
     grid-auto-rows: 21px;
@@ -1200,18 +1283,79 @@ body.tray-collapsed .tray-collapse-btn {
     line-height: 21px;
     text-indent: 0;
     letter-spacing: 0;
+    /* 手機是「點選」不是「拖曳上色」 */
+    cursor: pointer;
+    -webkit-user-drag: none;
   }
 
-  .color-controls:hover .color-palette,
-  .color-palette:hover {
-    display: none;
-  }
-
+  /* 開合唯一的真相：這個 class。桌面那兩條 hover 規則已經關在
+     min-width: 721px 裡，這裡不需要（也不該）再寫一條 display:none 去蓋。 */
   body.color-palette-open .color-palette {
     display: grid;
   }
 
+  /* ── 選中的紅字：綁 .is-selected，不綁 :hover ────────────────
+     Rec 回報「選中 knot → 點 🎨 → 紅字 effect 就消失了」。
+     原因是那個紅來自 `.delete-btn:hover`：觸控上手指離開就沒了，
+     手指移到 🎨 上，紅自然跟著走。**紅本來就該表示「這顆被選中」，不是「手指在這」。**
+     （同一個病灶第四次：調色盤開合、zoom 卡紅、emoji alpha，全是 hover 在觸控上失義。）
+     順序重要：先把 hover 壓回中性，再由 .is-selected 上紅 ——
+     兩條特異度都是 (0,3,0)，靠源順序決勝。 */
+  .knot:hover .delete-btn,
+  .knot:hover .knot-edit-btn,
+  .delete-btn:hover,
+  .knot-edit-btn:hover {
+    color: var(--ctrl-fg);
+  }
+
+  .knot.is-selected .delete-btn {
+    color: var(--red);
+  }
+
   .tray-collapse-btn {
     display: none !important;
+  }
+
+  /* ── 手機底列的按壓回饋 ────────────────────────────────
+     語彙抄 altar / rec-pf 的 .circle-btn：**往下一點 ＋ 底色加深**。
+     兩點跟那邊不同，都是 Rec 定的：
+       · 沒有 transition —— 「立刻回饋就行」，而且這站禁動畫
+       · 位移只在手指按著時有；**面板開著時只留加深的底色**（不留位移）
+
+     加深階不是隨手挑的。三種底色要「深同一級」＝ 對白底的對比增量一致（Δ≈+0.21）：
+       magenta .16→.26 (Δ+0.220) · 棕橙 .16→.28 (Δ+0.207) · 中性 .10→.16 (Δ+0.197)
+     直接三顆都 +0.10 的話，中性那顆會深得比另外兩顆明顯得多。 */
+  .menu-drawer-toggle:active,
+  .tray-drawer-toggle:active,
+  .color-dot-btn:active,
+  .zoom-btn:active {
+    transform: translateY(2px);
+  }
+
+  /* 按著時：加深 */
+  .color-dot-btn:active,
+  .zoom-btn:active {
+    background: rgba(0, 0, 0, 0.16);
+  }
+
+  body.has-menus .menu-drawer-toggle:active {
+    background: rgba(255, 0, 255, 0.26);
+  }
+
+  .tray-drawer-toggle:active {
+    background: rgba(240, 82, 10, 0.28);
+  }
+
+  /* 面板開著時：**只有**加深留著，位移不留 */
+  body.color-palette-open .color-dot-btn {
+    background: rgba(0, 0, 0, 0.16);
+  }
+
+  body.has-menus.menu-drawer-open .menu-drawer-toggle {
+    background: rgba(255, 0, 255, 0.26);
+  }
+
+  body.tray-drawer-open .tray-drawer-toggle {
+    background: rgba(240, 82, 10, 0.28);
   }
 }

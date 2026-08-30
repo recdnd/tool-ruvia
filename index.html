@@ -4,6 +4,9 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Ruvia</title>
+  <link rel="icon" href="icons/favicon.ico" sizes="32x32">
+  <link rel="icon" href="icons/favicon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
@@ -12,13 +15,6 @@
       <div class="title-wrap">
         <h1 class="title">Ruvia</h1>
         <div class="subtitle">compact knot workbench</div>
-      </div>
-      <div class="toolbar-actions">
-        <button id="newKnotBtn" class="tool-btn" type="button">New Knot</button>
-        <button id="exportBtn" class="tool-btn" type="button">Export Root</button>
-        <button id="importBtn" class="tool-btn" type="button">Import Root</button>
-        <button id="resetBtn" class="tool-btn danger" type="button">Reset</button>
-        <input id="importInput" type="file" accept=".root,.json,application/json" multiple hidden>
       </div>
     </header>
 
@@ -40,23 +36,23 @@
       </section>
 
       <aside id="tray" class="tray-pane" aria-label="tray area">
-        <div class="tray-head">
-          <div class="tray-title">tray</div>
-          <div class="tray-actions">
-            <button id="trayImportBtn" class="tray-action-btn" type="button" title="Import Root">in</button>
-            <button id="trayExportBtn" class="tray-action-btn" type="button" title="Export Root">out</button>
-          </div>
+        <div class="bulb-row" role="toolbar" aria-label="root actions">
+          <button id="newKnotBtn" class="bulb" type="button">+knot</button>
+          <button id="exportBtn" class="bulb" type="button">export</button>
+          <button id="importBtn" class="bulb" type="button">import</button>
+          <button id="resetBtn" class="bulb" type="button">reset</button>
+          <input id="importInput" type="file" accept=".root,.json,application/json" multiple hidden>
         </div>
         <div id="templateTray" class="template-tray"></div>
         <div id="trayKnotLayer" class="tray-knot-layer"></div>
       </aside>
       <button id="trayCollapseBtn" class="tray-collapse-btn" type="button" aria-label="toggle tray">❯</button>
-      <button id="trayDrawerToggle" class="tray-drawer-toggle" type="button" aria-label="open tray">◱</button>
+      <button id="trayDrawerToggle" class="tray-drawer-toggle" type="button" aria-label="open tray" title="tray">🗃️</button>
 
       <div id="menu-panel" class="menu-panel" aria-label="menu panel">
         <div id="menu-panel-list"></div>
       </div>
-      <button id="menuDrawerToggle" class="menu-drawer-toggle" type="button" aria-label="open menu">𓏢</button>
+      <button id="menuDrawerToggle" class="menu-drawer-toggle" type="button" aria-label="open menu" title="pack">🪉</button>
     </main>
   </div>
 
