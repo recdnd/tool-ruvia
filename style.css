@@ -966,7 +966,8 @@ body.tray-collapsed .tray-collapse-btn {
 
 .menu-item {
   display: grid;
-  grid-template-columns: 14px 1fr 14px;
+  /* prefix / 名稱 / ✐ / × */
+  grid-template-columns: 14px 1fr 14px 14px;
   align-items: start;
   column-gap: 4px;
   padding: 2px 1px;
@@ -979,6 +980,8 @@ body.tray-collapsed .tray-collapse-btn {
   letter-spacing: 0.03em;
   cursor: pointer;
   user-select: none;
+  /* 上下拖動換位時不要讓瀏覽器把手勢當成捲動搶走 */
+  touch-action: none;
   transition: background-color 0.12s ease, color 0.12s ease, box-shadow 0.12s ease;
 }
 
@@ -998,6 +1001,37 @@ body.tray-collapsed .tray-collapse-btn {
   color: rgba(12, 8, 10, 0.98);
   box-shadow: inset 0 0 0 1px rgba(190, 110, 125, 0.32);
   text-shadow: 0 0 10px rgba(255, 180, 195, 0.35);
+}
+
+/* ── root deck 的「＋」列 ────────────────────────────
+   無內框、單純一個居中 +。寬度走 width:100%，從 #menu-panel-list 繼承 ——
+   **不需要量任何長度**（Rec 2026-08-30）。
+   上面那條分隔線是白撿的：`.menu-item:last-child { border-bottom: none }`
+   在本列加進來之後不再命中最後一個 menu，於是它自己長出了分隔線。 */
+.menu-add-row {
+  padding: 0;
+  margin: 0;
+}
+
+.menu-add-btn {
+  display: block;
+  width: 100%;
+  padding: 2px 0 3px 0;
+  border: 0;
+  background: transparent;
+  color: rgba(48, 36, 40, 0.5);
+  font-family: ui-monospace, "Cascadia Code", "SF Mono", Menlo, monospace;
+  font-size: 12px;
+  line-height: 1.25;
+  text-align: center;
+  cursor: pointer;
+  user-select: none;
+}
+
+.menu-add-btn:hover,
+.menu-add-btn:focus-visible {
+  color: var(--red);
+  outline: none;
 }
 
 .menu-item-prefix {
@@ -1030,8 +1064,32 @@ body.tray-collapsed .tray-collapse-btn {
 }
 
 .menu-item:hover .menu-item-edit,
-.menu-item:focus-within .menu-item-edit {
+.menu-item:focus-within .menu-item-edit,
+.menu-item:hover .menu-item-delete,
+.menu-item:focus-within .menu-item-delete {
   display: inline-block;
+}
+
+/* × 刪除：跟 ✐ 同一顆殼，只有顏色語義不同（紅＝破壞性） */
+.menu-item-delete {
+  display: none;
+  width: 14px;
+  height: 14px;
+  padding: 0;
+  margin: 0;
+  border: 0;
+  background: transparent;
+  color: rgba(88, 66, 72, 0.82);
+  font-size: 11px;
+  line-height: 14px;
+  font-family: var(--font-ui);
+  cursor: pointer;
+}
+
+.menu-item-delete:hover,
+.menu-item-delete:focus-visible {
+  color: var(--red);
+  outline: none;
 }
 
 .menu-item-edit:hover,
@@ -1310,6 +1368,23 @@ body.tray-collapsed .tray-collapse-btn {
 
   .knot.is-selected .delete-btn {
     color: var(--red);
+  }
+
+  /* 手機沒有 hover：✐ 與 × 改成常駐，否則永遠叫不出來 */
+  .menu-item-edit,
+  .menu-item-delete {
+    display: inline-block;
+  }
+
+  /* 跟底列同一條規矩：觸控沒有 hover，回饋交給 :active */
+  .menu-add-btn:hover,
+  .menu-add-btn:focus-visible {
+    color: rgba(48, 36, 40, 0.5);
+  }
+
+  .menu-add-btn:active {
+    color: var(--red);
+    transform: translateY(1px);
   }
 
   .tray-collapse-btn {

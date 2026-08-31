@@ -53,6 +53,7 @@
   const app = {
     state: loadState(),
     selectedKnotId: null,
+    suppressMenuClick: false,
     dragKnot: null,
     dragKnotLayer: null,
     offsetX: 0,
@@ -794,10 +795,20 @@
       btn.textContent = labels[i];
       btn.title = "New knot in tray";
       btn.addEventListener("click", () => {
-        // 手機：隨機不重疊。桌面：維持原本的堆疊（Rec 只指定手機版）
-        const spot = isMobileTray()
-          ? getTraySpotForNew()
-          : { x: 8, y: countTrayKnots() * 36 };
+        // 跟 root deck 的「＋」同一條邏輯：**＋ 指的就是下一顆會出現的地方。**
+        // 差別在位置：root deck 的 ＋ 在最後（新的往下接），
+        // tray 的 ＋ 在第一個（Rec 指定），所以新 knot 落在最上面那一格，
+        // 既有的整批往下推一格 —— 這樣 ＋ 才真的指著下一顆的位置。
+        // 手機不適用：Rec 已指定手機 tray 不排網格，走隨機不重疊。
+        const TRAY_STEP = 36;
+        if (!isMobileTray()) {
+          for (const k of app.state.knots) {
+            if (!isTrayKnot(k)) continue;
+            const l = getKnotLayout(app.state, k.id);
+            setKnotLayout(app.state, k.id, { ...l, y: l.y + TRAY_STEP });
+          }
+        }
+        const spot = isMobileTray() ? getTraySpotForNew() : { x: 8, y: 0 };
         createKnot({
           contentExpanded: true,
           x: spot.x,
@@ -1573,7 +1584,7 @@
       actions.className = "knot-actions";
 
       const editBtn = makeBtn("knot-edit-btn", "✐", "Rename knot");
-      const deleteBtn = makeBtn("delete-btn", "x", "Delete knot");
+      const deleteBtn = makeBtn("delete-btn", "\u00d7", "Delete knot");
       actions.append(editBtn, deleteBtn);
 
       header.append(title, actions);
@@ -2093,6 +2104,13 @@
     editBtn.textContent = "✐";
     editBtn.title = "Rename file";
 
+    const delBtn = document.createElement("button");
+    delBtn.type = "button";
+    delBtn.className = "menu-item-delete";
+    delBtn.textContent = "\u00d7";
+    delBtn.title = "Delete root";
+    delBtn.setAttribute("aria-label", "Delete root");
+
     const finishRename = (save) => {
       const nextName = (name.textContent || "").trim();
       name.contentEditable = "false";
@@ -2133,11 +2151,81 @@
       name.addEventListener("keydown", onKeyDown);
     });
 
-    row.append(prefix, name, editBtn);
+    delBtn.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      if (typeof opts.onDelete === "function") opts.onDelete();
+    });
+
+    row.append(prefix, name, editBtn, delBtn);
     if (typeof opts.onClick === "function") {
       row.addEventListener("click", opts.onClick);
     }
     return row;
+  }
+
+  // 刪掉一棵樹。**沒有確認彈窗**（Rec 指定），所以清理必須乾淨且不誤傷：
+  //  · 該樹的畫布 knot／edge 一起刪 —— 留著會變成看不見卻仍會 export 的垃圾
+  //  · tray 的 knot **不刪**，改掛到接手的那棵樹 —— tray 是暫存區，不該跟著某棵樹陪葬
+  //  · deck 不能空：資料模型從 createDefaultState 起就假設至少有一棵
+  function deleteMenu(menuId) {
+    const idx = app.state.menus.findIndex((m) => m.id === menuId);
+    if (idx < 0) return;
+
+    const doomed = app.state.menus[idx];
+    const trayIds = doomed.knotIds.filter((id) => {
+      const k = getKnotById(app.state, id);
+      return k && isTrayKnot(k);
+    });
+
+    app.state.menus.splice(idx, 1);
+
+    if (app.state.hierarchy && Array.isArray(app.state.hierarchy.folders)) {
+      for (const f of app.state.hierarchy.folders) {
+        if (Array.isArray(f.menuIds)) {
+          f.menuIds = f.menuIds.filter((id) => id !== menuId);
+        }
+      }
+    }
+
+    if (!app.state.menus.length) {
+      const fresh = { id: uid("m"), name: "", knotIds: [], edgeIds: [], meta: {} };
+      app.state.menus.push(fresh);
+      const folder =
+        app.state.hierarchy &&
+        Array.isArray(app.state.hierarchy.folders) &&
+        app.state.hierarchy.folders[0];
+      if (folder && Array.isArray(folder.menuIds)) folder.menuIds.push(fresh.id);
+    }
+
+    if (!app.state.menus.some((m) => m.id === app.state.ui.activeMenuId)) {
+      app.state.ui.activeMenuId = app.state.menus[0].id;
+    }
+
+    // tray 的 knot 交給接手的那棵樹，才不會變成孤兒
+    const heir = getMenuById(app.state, app.state.ui.activeMenuId);
+    if (heir) {
+      for (const id of trayIds) addKnotToMenuProjection(app.state, heir.id, id);
+    }
+
+    // 清掉沒有任何一棵樹再引用的 knot / edge / layout
+    const liveKnots = new Set();
+    const liveEdges = new Set();
+    for (const m of app.state.menus) {
+      for (const id of m.knotIds) liveKnots.add(id);
+      for (const id of m.edgeIds) liveEdges.add(id);
+    }
+    app.state.knots = app.state.knots.filter((k) => liveKnots.has(k.id));
+    app.state.edges = app.state.edges.filter((e) => liveEdges.has(e.id));
+    for (const id of Object.keys(app.state.ui.layout.knots)) {
+      if (!liveKnots.has(id)) delete app.state.ui.layout.knots[id];
+    }
+
+    if (app.selectedKnotId && !liveKnots.has(app.selectedKnotId)) {
+      app.selectedKnotId = null;
+    }
+
+    syncHierarchyFiles(app.state);
   }
 
   function renderMenuPanel() {
@@ -2155,7 +2243,18 @@
           saveState();
           render();
         },
+        onDelete: () => {
+          deleteMenu(menu.id);
+          touchDocumentUpdated();
+          saveState();
+          render();
+        },
         onClick: () => {
+          // 剛剛是拖動換位，不是點選
+          if (app.suppressMenuClick) {
+            app.suppressMenuClick = false;
+            return;
+          }
           app.state.ui.activeMenuId = menu.id;
           if (window.matchMedia("(max-width: 720px)").matches) {
             document.body.classList.remove("menu-drawer-open");
@@ -2166,11 +2265,119 @@
       };
 
       const row = createFallbackMenuRow(rowOpts);
+      row.dataset.menuId = menu.id;
+      attachMenuRowReorder(row, menu.id);
 
       frag.append(row);
     }
 
+    frag.append(createAddRootRow());
+
     list.replaceChildren(frag);
+  }
+
+  // root 列上下拖動換位。用 pointer 事件（觸控才拖得動，跟 knot 拖曳同一個理由）。
+  // 換位當下就 render()，所以「列在手指底下重排」本身就是回饋 —— 不另外做拖曳樣式或動畫。
+  // ⚠️ 不用 setPointerCapture：render() 會把這一列換掉，capture 跟著失效；掛 window 才穩。
+  function attachMenuRowReorder(row, menuId) {
+    row.addEventListener("pointerdown", (event) => {
+      if (event.button !== 0) return;
+      if (event.target.closest(".menu-item-edit, .menu-item-delete")) return;
+      if (row.classList.contains("is-renaming")) return;
+
+      // 每次按下先清旗標，避免上一輪沒吃到 click 的殘留把下一次正常點選吞掉
+      app.suppressMenuClick = false;
+
+      const startY = event.clientY;
+      let moved = false;
+
+      const onMove = (moveEvent) => {
+        if (!moved && Math.abs(moveEvent.clientY - startY) < 4) return;
+        moved = true;
+
+        const list = document.getElementById("menu-panel-list");
+        if (!list) return;
+        const rows = [...list.querySelectorAll(".menu-item[data-menu-id]")];
+        if (!rows.length) return;
+
+        let target = rows.length - 1;
+        for (let i = 0; i < rows.length; i++) {
+          const r = rows[i].getBoundingClientRect();
+          if (moveEvent.clientY < r.top + r.height / 2) {
+            target = i;
+            break;
+          }
+        }
+
+        const from = app.state.menus.findIndex((m) => m.id === menuId);
+        if (from < 0 || from === target) return;
+
+        const [m] = app.state.menus.splice(from, 1);
+        app.state.menus.splice(target, 0, m);
+        saveState();
+        render();
+      };
+
+      const onUp = () => {
+        window.removeEventListener("pointermove", onMove);
+        window.removeEventListener("pointerup", onUp);
+        window.removeEventListener("pointercancel", onUp);
+        if (moved) {
+          app.suppressMenuClick = true;
+          touchDocumentUpdated();
+          saveState();
+        }
+      };
+
+      window.addEventListener("pointermove", onMove);
+      window.addEventListener("pointerup", onUp);
+      window.addEventListener("pointercancel", onUp);
+    });
+  }
+
+  // root deck 的「＋」：無內框、單純一個居中 +。
+  // 寬度用 width:100% 從清單容器繼承 —— **不量任何長度**（Rec 2026-08-30 的要求）。
+  // 沒有做成「預先放一列 opacity:0 再顯示」，因為那一列會是 state 裡的幽靈 menu，
+  // 會跟著 export 進 .root。用 100% 一樣不用量，而且不弄髒資料。
+  function createAddRootRow() {
+    const row = document.createElement("div");
+    row.className = "menu-add-row";
+
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "menu-add-btn";
+    btn.textContent = "+";
+    btn.title = "New root";
+    btn.setAttribute("aria-label", "New root");
+
+    btn.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+
+      // 名字留空 → 列表顯示既有的 fallback「Untitled tree」，可按 ✐ 改名。
+      // 沒有自訂命名規則：命名是 Rec 拍板的事。
+      const menu = { id: uid("m"), name: "", knotIds: [], edgeIds: [], meta: {} };
+      app.state.menus.push(menu);
+
+      const folder =
+        app.state.hierarchy &&
+        Array.isArray(app.state.hierarchy.folders) &&
+        app.state.hierarchy.folders[0];
+      if (folder && Array.isArray(folder.menuIds)) folder.menuIds.push(menu.id);
+
+      app.state.ui.activeMenuId = menu.id;
+      app.selectedKnotId = null;
+
+      // 跟既有的列點擊同一個收合行為
+      if (isMobileView()) document.body.classList.remove("menu-drawer-open");
+
+      touchDocumentUpdated();
+      saveState();
+      render();
+    });
+
+    row.append(btn);
+    return row;
   }
 
   function edgeStroke() {
