@@ -4,9 +4,10 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Ruvia</title>
-  <link rel="icon" href="icons/favicon.ico" sizes="32x32">
-  <link rel="icon" href="icons/favicon.svg" type="image/svg+xml">
-  <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+  <link rel="icon" href="icons/favicon.ico?v=20260916b" sizes="16x16 32x32 48x48">
+  <link rel="icon" href="icons/favicon.svg?v=20260916b" type="image/svg+xml" sizes="any">
+  <link rel="apple-touch-icon" href="icons/apple-touch-icon.png?v=20260916b">
+  <link rel="icon" href="icons/icon-192.png?v=20260916b" sizes="192x192" type="image/png">
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
@@ -40,12 +41,15 @@
           <button id="newKnotBtn" class="bulb" type="button">+knot</button>
           <button id="exportBtn" class="bulb" type="button">export</button>
           <button id="importBtn" class="bulb" type="button">import</button>
+          <button id="agentSpecBtn" class="bulb" type="button" title="Copy the .root spec for an AI agent" aria-label="Copy agent spec">🤖</button>
           <button id="resetBtn" class="bulb" type="button">reset</button>
           <input id="importInput" type="file" accept=".root,.json,application/json" multiple hidden>
         </div>
         <div id="templateTray" class="template-tray"></div>
         <div id="trayKnotLayer" class="tray-knot-layer"></div>
       </aside>
+      <button id="undoBtn" class="undo-btn" type="button" title="Undo (Cmd/Ctrl+Z)" aria-label="Undo">↺</button>
+      <button id="redoBtn" class="undo-btn redo-btn" type="button" title="Redo (Cmd/Ctrl+Shift+Z)" aria-label="Redo">↻</button>
       <button id="trayCollapseBtn" class="tray-collapse-btn" type="button" aria-label="toggle tray">❯</button>
       <button id="trayDrawerToggle" class="tray-drawer-toggle" type="button" aria-label="open tray" title="tray">🗃️</button>
 
