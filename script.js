@@ -1,7 +1,7 @@
 (function () {
   /*
    * Knots/edges/menus/roots live in one document; canvas shows the active menu slice.
-   * ui.layout stores positions only — no semantic knot types in core paths.
+   * ui.layout stores positions only -- no semantic knot types in core paths.
    * Helpers use knot/menu names (setKnotLayout, getKnotIdsForMenu); legacy import keys may still say nodes/nodeIds.
    * files.menuText + files.structureText are regenerated from hierarchy + menus (single source).
    * Selection, drag, connect, hover are runtime-only and not exported.
@@ -10,17 +10,34 @@
   const LEGACY_STORAGE_KEY = "ruvia.v1.state";
   const THEME_KEY = "ruvia.theme";
   const ZOOM_KEY = "ruvia.zoom";
-  const GLOBAL_SCALE = 3;
-  const SPEC = "ruvia-doc/0.1";
+  // 世界單位在 2026-08-30 重訂了一次: 所有座標/尺寸 ×2, 這個倍率同步減半,
+  // **畫面上的淨值完全不變**. 動機是 iOS -- Safari 在 focus 一個 font-size < 16px 的
+  // 輸入框時會自動放大整頁, 而 iOS 看的是 computed font-size, transform 縮放救不了.
+  // 唯一的解法就是讓宣告值真的 ≥16px, 代價是世界單位要跟著放大一倍.
+  const GLOBAL_SCALE = 1.5;
+
+  // ⚠️ 這幾個常數必須宣告在 `app` 之前 -- app 建立時就呼叫 loadZoom(),
+  //    放到後面會踩 const 的 temporal dead zone, 整個腳本在載入就掛掉.
+  //
+  // 有效倍率 = app.zoom × GLOBAL_SCALE(3). 預設 0.5 → 有效 1.5, 全站版面都照這個調的.
+  // 下限原本是 0.5 -- **跟預設值一模一樣**, 所以「縮小」按了完全沒反應.
+  // 放到 0.12(有效 0.36)才真的有得縮. 小數保留 3 位,
+  // 否則乘法步進到低倍率會被 toFixed(2) 量化到卡住.
+  const ZOOM_DEFAULT = 0.5;
+  const ZOOM_MIN = 0.12;
+  const ZOOM_MAX = 1.6;
+  const ZOOM_STEP = 1.25;
+  const SPEC = "ruvia-doc/0.2";
+  const SPEC_LEGACY_HALF_SCALE = "ruvia-doc/0.1"; // 世界單位是現在的一半
   const KNOT_SIZE = {
-    width: 96,
-    height: 28,
-    minWidth: 72,
-    minHeight: 18
+    width: 192,
+    height: 56,
+    minWidth: 144,
+    minHeight: 36
   };
   const STASH_KNOT_SIZE = {
-    width: 96,
-    height: 28
+    width: 192,
+    height: 56
   };
   const RUVIA_COLORS = [
     { name: "primrose", hex: "#efe5a8" },
@@ -54,6 +71,10 @@
     state: loadState(),
     selectedKnotId: null,
     suppressMenuClick: false,
+    undoStack: [],
+    coalesceKey: null,
+    redoStack: [],
+    lastSaved: null,
     dragKnot: null,
     dragKnotLayer: null,
     offsetX: 0,
@@ -129,6 +150,73 @@
         location: "canvas"
       });
     }
+
+    bindUndoHotkeys();
+
+    const undoBtn = document.getElementById("undoBtn");
+    if (undoBtn) {
+      undoBtn.addEventListener("click", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        app.coalesceKey = null; // 按了鈕就結束目前這段輸入
+        undo();
+      });
+    }
+
+    const agentSpecBtn = document.getElementById("agentSpecBtn");
+    if (agentSpecBtn) {
+      agentSpecBtn.addEventListener("click", async (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+
+        const built = buildAgentSpec();
+        if (!built.ok) {
+          // 規範自帶的範例過不了自己的驗證器 -- 那是程式改了規範沒跟上.
+          // 寧可什麼都不複製, 也不要把錯的規範交給 agent.
+          agentSpecBtn.textContent = "!";
+          console.error("[agent-spec] 範例驗證失敗: ", built.error);
+          setTimeout(() => { agentSpecBtn.textContent = "\u{1F916}"; }, 1200);
+          return;
+        }
+
+        let copied = false;
+        try {
+          await navigator.clipboard.writeText(built.text);
+          copied = true;
+        } catch (_e) {
+          // 非 https/舊瀏覽器沒有 clipboard API, 退回 execCommand
+          const ta = document.createElement("textarea");
+          ta.value = built.text;
+          ta.setAttribute("readonly", "");
+          ta.style.position = "fixed";
+          ta.style.top = "-1000px";
+          document.body.append(ta);
+          ta.select();
+          try { copied = document.execCommand("copy"); } catch (_e2) { copied = false; }
+          ta.remove();
+        }
+
+        // 點擊式按鈕的完成回饋走「字符瞬切」--燈泡按鈕模組指定的做法
+        // (setTimeout 換字元, 不是 CSS 動畫). 觸控端沒有 hover, 顏色靠不住.
+        agentSpecBtn.textContent = copied ? "\u2705" : "!";
+        setTimeout(() => { agentSpecBtn.textContent = "\u{1F916}"; }, 600);
+      });
+    }
+
+    const redoBtn = document.getElementById("redoBtn");
+    if (redoBtn) {
+      redoBtn.addEventListener("click", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        app.coalesceKey = null;
+        redo();
+      });
+    }
+
+    // 撤銷的基準點: 初始載入完成後的樣子.
+    // 不設的話第一個動作會因為 lastSaved == null 而不進堆疊, 變成撤不回來.
+    app.lastSaved = JSON.stringify(app.state);
+    syncHistoryUi();
 
     applyZoom();
     render();
@@ -218,7 +306,7 @@
     app.dom.resetBtn.addEventListener("click", () => {
       if (
         !confirm(
-          "將刪除本機全部 Ruvia 資料（工作區、縮放、主題），並只載入示例樹。確定？"
+          "將刪除本機全部 Ruvia 資料(工作區, 縮放, 主題), 並只載入示例樹. 確定?"
         )
       ) {
         return;
@@ -277,8 +365,8 @@
 
   function updateColorDot(knot) {
     if (!app.dom.colorDotBtn) return;
-    // 手機那顆是 🎨，不是變色小點 —— 不染色，也不要留下沒有作用的 inline style。
-    // 桌面才是「小點顯示目前顏色」的設計。（Rec 2026-08-30：兩邊嚴格分離）
+    // 手機那顆是 🎨, 不是變色小點 -- 不染色, 也不要留下沒有作用的 inline style.
+    // 桌面才是「小點顯示目前顏色」的設計. (Rec 2026-08-30: 兩邊嚴格分離)
     if (isMobileView()) {
       app.dom.colorDotBtn.style.removeProperty("color");
       return;
@@ -335,13 +423,13 @@
       const colorName = dot.dataset.colorName;
       if (!colorName) return;
 
-      // 方案 C（2026-08-30 拍板）：選色 ＝ **上膛**，不是立刻套用。
-      // 桌面本來就是這個流程（選色 → 游標帶色 → 點 knot → 染色 → 自動卸膛），
-      // 手機只是把「帶色的游標」換成「帶色的按鈕」。兩邊同一個心智模型。
+      // 方案 C(2026-08-30 拍板): 選色 = **上膛**, 不是立刻套用.
+      // 桌面本來就是這個流程(選色 → 游標帶色 → 點 knot → 染色 → 自動卸膛),
+      // 手機只是把「帶色的游標」換成「帶色的按鈕」. 兩邊同一個心智模型.
       if (isMobileView()) {
         event.preventDefault();
         event.stopPropagation();
-        document.body.classList.remove("color-palette-open"); // 選完就收，畫布還給使用者
+        document.body.classList.remove("color-palette-open"); // 選完就收, 畫布還給使用者
       }
 
       app.activeColorName = colorName;
@@ -454,8 +542,8 @@
     return el;
   }
 
-  // 「上膛」的指示面有兩個：桌面是跟著游標跑的色點，手機沒有游標，
-  // 所以改成把 🎨 換成該顏色的實心點。**同一個 app.activeColorName 狀態**，只是畫在不同地方。
+  // 「上膛」的指示面有兩個: 桌面是跟著游標跑的色點, 手機沒有游標,
+  // 所以改成把 🎨 換成該顏色的實心點. **同一個 app.activeColorName 狀態**, 只是畫在不同地方.
   function setColorArmedIndicator(colorName) {
     const btn = app.dom.colorDotBtn;
     if (!btn) return;
@@ -513,13 +601,15 @@
   function bindZoomControls() {
     if (app.dom.zoomOutBtn) {
       app.dom.zoomOutBtn.addEventListener("click", () => {
-        setZoom(app.zoom - 0.1);
+        // 乘法步進, 不是加減 -- 固定 0.1 的話, 靠近下限時一下就砍掉一半,
+        // 靠近上限時又幾乎看不出變化. 乘法在整個範圍內每一下的感受一樣.
+        setZoom(app.zoom / ZOOM_STEP);
       });
     }
 
     if (app.dom.zoomInBtn) {
       app.dom.zoomInBtn.addEventListener("click", () => {
-        setZoom(app.zoom + 0.1);
+        setZoom(app.zoom * ZOOM_STEP);
       });
     }
 
@@ -527,11 +617,11 @@
       if (event.target && /input|textarea/i.test(event.target.tagName)) return;
 
       if (event.key === "[") {
-        setZoom(app.zoom - 0.1);
+        setZoom(app.zoom / ZOOM_STEP);
       }
 
       if (event.key === "]") {
-        setZoom(app.zoom + 0.1);
+        setZoom(app.zoom * ZOOM_STEP);
       }
     });
   }
@@ -620,8 +710,14 @@
   }
 
   function loadZoom() {
-    const raw = Number(localStorage.getItem(ZOOM_KEY));
-    if (!Number.isFinite(raw)) return 1.35;
+    const stored = localStorage.getItem(ZOOM_KEY);
+    // ⚠️ 原本寫 Number(localStorage.getItem(...)): 沒存過時是 Number(null) = **0**,
+    //    而 Number.isFinite(0) 為 true, 所以那句 `return 1.35` 從來沒被執行過,
+    //    真正拿到的是 clampZoom(0) = 舊下限 0.5. 預設值剛好壓在下限上 --
+    //    這才是「縮小按了沒反應」的真正原因.
+    if (stored === null || stored === "") return ZOOM_DEFAULT;
+    const raw = Number(stored);
+    if (!Number.isFinite(raw) || raw <= 0) return ZOOM_DEFAULT;
     return clampZoom(raw);
   }
 
@@ -699,8 +795,8 @@
     };
   }
 
-  // ── 手機 tray：不排網格 ─────────────────────────────
-  // [+] 每顆落在 tray 內隨機、且與現有 knot 不重疊的位置；界內保證。
+  // -- 手機 tray: 不排網格 -----------------------------
+  // [+] 每顆落在 tray 內隨機, 且與現有 knot 不重疊的位置; 界內保證.
   const TRAY_GAP = 6;
   const TRAY_SPOT_TRIES = 300;
 
@@ -708,7 +804,7 @@
     return window.matchMedia("(max-width: 720px)").matches;
   }
 
-  // 實際渲染尺寸優先（CSS 有 width:192px !important，算不出來），量不到才退回常數
+  // 實際渲染尺寸優先(CSS 有 width:192px !important, 算不出來), 量不到才退回常數
   function getTrayKnotBox(knotId) {
     const el = app.dom.trayKnotLayer
       ? app.dom.trayKnotLayer.querySelector('.knot[data-knot-id="' + knotId + '"]')
@@ -724,7 +820,7 @@
     };
   }
 
-  // 還沒建出來的新 knot：量現有任一顆當樣本
+  // 還沒建出來的新 knot: 量現有任一顆當樣本
   function getTrayNewKnotBox() {
     const el = app.dom.trayKnotLayer
       ? app.dom.trayKnotLayer.querySelector(".knot")
@@ -745,8 +841,8 @@
     );
   }
 
-  // placed 已放好的格子；回傳界內、盡量不重疊的一個點。
-  // tray 真的塞滿時放不出零重疊 —— 那就回傳重疊最少的，但**永遠在界內**。
+  // placed 已放好的格子; 回傳界內, 盡量不重疊的一個點.
+  // tray 真的塞滿時放不出零重疊 -- 那就回傳重疊最少的, 但**永遠在界內**.
   function pickTraySpot(placed, w, h, maxX, maxY) {
     let best = null;
     for (let i = 0; i < TRAY_SPOT_TRIES; i++) {
@@ -782,7 +878,7 @@
   }
 
   function clampZoom(value) {
-    return Math.min(1.6, Math.max(0.5, Number(value.toFixed(2))));
+    return Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, Number(Number(value).toFixed(3))));
   }
 
   function renderTemplates() {
@@ -795,12 +891,12 @@
       btn.textContent = labels[i];
       btn.title = "New knot in tray";
       btn.addEventListener("click", () => {
-        // 跟 root deck 的「＋」同一條邏輯：**＋ 指的就是下一顆會出現的地方。**
-        // 差別在位置：root deck 的 ＋ 在最後（新的往下接），
-        // tray 的 ＋ 在第一個（Rec 指定），所以新 knot 落在最上面那一格，
-        // 既有的整批往下推一格 —— 這樣 ＋ 才真的指著下一顆的位置。
-        // 手機不適用：Rec 已指定手機 tray 不排網格，走隨機不重疊。
-        const TRAY_STEP = 36;
+        // 跟 root deck 的「+」同一條邏輯: **+ 指的就是下一顆會出現的地方. **
+        // 差別在位置: root deck 的 + 在最後(新的往下接),
+        // tray 的 + 在第一個(Rec 指定), 所以新 knot 落在最上面那一格,
+        // 既有的整批往下推一格 -- 這樣 + 才真的指著下一顆的位置.
+        // 手機不適用: Rec 已指定手機 tray 不排網格, 走隨機不重疊.
+        const TRAY_STEP = 72;
         if (!isMobileTray()) {
           for (const k of app.state.knots) {
             if (!isTrayKnot(k)) continue;
@@ -808,7 +904,7 @@
             setKnotLayout(app.state, k.id, { ...l, y: l.y + TRAY_STEP });
           }
         }
-        const spot = isMobileTray() ? getTraySpotForNew() : { x: 8, y: 0 };
+        const spot = isMobileTray() ? getTraySpotForNew() : { x: 16, y: 0 };
         createKnot({
           contentExpanded: true,
           x: spot.x,
@@ -875,8 +971,8 @@
         });
       }
 
-      // pointerdown 而非 mousedown：滑鼠一樣會派送 pointer 事件，
-      // 但觸控裝置**只有** pointer 事件 —— 這是手機上 tray 內拖得動的唯一條件。
+      // pointerdown 而非 mousedown: 滑鼠一樣會派送 pointer 事件,
+      // 但觸控裝置**只有** pointer 事件 -- 這是手機上 tray 內拖得動的唯一條件.
       layer.addEventListener("pointerdown", (event) => {
         if (event.button !== 0) return;
         if (event.target.closest(".port")) return;
@@ -983,8 +1079,8 @@
           render();
         };
 
-        // 不用 setPointerCapture：render() 每次都 replaceChildren，
-        // 被捕獲的元素會在拖曳中途被換掉，capture 跟著失效。掛 window 才穩。
+        // 不用 setPointerCapture: render() 每次都 replaceChildren,
+        // 被捕獲的元素會在拖曳中途被換掉, capture 跟著失效. 掛 window 才穩.
         window.addEventListener("pointermove", onMove);
         window.addEventListener("pointerup", onUp);
         window.addEventListener("pointercancel", onUp);
@@ -994,8 +1090,8 @@
         if (app.activeColorName) {
           const targetKnotEl = event.target.closest(".knot");
           if (targetKnotEl) {
-            // id 要在染色前抓：applyColorToKnot() 會 render()，
-            // 之後 event.target 已經是被換掉的舊節點，closest() 不能再信。
+            // id 要在染色前抓: applyColorToKnot() 會 render(),
+            // 之後 event.target 已經是被換掉的舊節點, closest() 不能再信.
             const paintId = targetKnotEl.dataset.knotId;
             const paintKnot = findKnot(paintId);
             if (paintKnot) {
@@ -1004,14 +1100,14 @@
             clearColorPaintMode();
 
             if (!isMobileView()) {
-              // 桌面：這一下只用來染色，吃掉。
+              // 桌面: 這一下只用來染色, 吃掉.
               event.preventDefault();
               event.stopPropagation();
               return;
             }
 
-            // 手機：染完順手把它選起來，使用者可以直接接著輸入。
-            // （只選中、不 focus —— 自動彈鍵盤比沒選中更煩。）
+            // 手機: 染完順手把它選起來, 使用者可以直接接著輸入.
+            // (只選中, 不 focus -- 自動彈鍵盤比沒選中更煩. )
             app.selectedKnotId = paintId;
             render();
             return;
@@ -1074,9 +1170,22 @@
           event.target.style.height = "auto";
           event.target.style.height = `${event.target.scrollHeight}px`;
           touchDocumentUpdated();
-          saveState();
+          // 連續輸入併成一步; 打到標點就切段(Rec 2026-08-30)
+          saveState({ coalesce: `text:${knot.id}` });
+          if (breaksTextRun(event, event.target.value)) {
+            app.coalesceKey = null;
+          }
         }
       });
+
+      // 離開輸入框 = 這一段輸入結束, 下次再打就是新的一步
+      layer.addEventListener(
+        "focusout",
+        () => {
+          app.coalesceKey = null;
+        },
+        true
+      );
 
       layer.addEventListener(
         "focusin",
@@ -1327,8 +1436,8 @@
     };
 
     const layout = {
-      x: options.x ?? 140 + app.state.knots.length * 12,
-      y: options.y ?? 90 + app.state.knots.length * 10,
+      x: options.x ?? 280 + app.state.knots.length * 24,
+      y: options.y ?? 180 + app.state.knots.length * 20,
       width: Number.isFinite(options.width) ? options.width : KNOT_SIZE.width,
       height: Number.isFinite(options.height) ? options.height : null,
       zIndex: nextZIndex()
@@ -1365,12 +1474,12 @@
   }
 
   function createExtendedKnot(sourceKnot, side) {
-    const gapX = 92;
+    const gapX = 184;
     const srcLayout = getKnotLayout(app.state, sourceKnot.id);
     const branchIndex = app.state.edges.filter((e) =>
       side === "right" ? e.from === sourceKnot.id : e.to === sourceKnot.id
     ).length;
-    const staggerY = branchIndex * 32;
+    const staggerY = branchIndex * 64;
 
     const activeMenu = getActiveMenu(app.state);
     const sourceInActiveMenu = activeMenu ? activeMenu.knotIds.includes(sourceKnot.id) : false;
@@ -1433,13 +1542,13 @@
     if (!from || !to) return;
     if (isTrayKnot(from) || isTrayKnot(to)) return;
 
-    // 從 right 拉出：source -> target
+    // 從 right 拉出: source -> target
     if (fromSide === "right") {
       ensureEdge(app.state, fromKnotId, toKnotId, "link");
       return;
     }
 
-    // 從 left 拉出：target -> source
+    // 從 left 拉出: target -> source
     if (fromSide === "left") {
       ensureEdge(app.state, toKnotId, fromKnotId, "link");
       return;
@@ -1504,8 +1613,8 @@
 
     if (!trayKnotIds.length) return;
 
-    // 逐顆檢查：出界、或跟已放好的重疊 → 重抽一個位置。
-    // 沒問題的那些**原地不動**（否則使用者自己拖好的位置每次開抽屜都會被洗掉）。
+    // 逐顆檢查: 出界, 或跟已放好的重疊 → 重抽一個位置.
+    // 沒問題的那些**原地不動**(否則使用者自己拖好的位置每次開抽屜都會被洗掉).
     const placed = [];
     for (const knotId of trayKnotIds) {
       const layout = getKnotLayout(app.state, knotId);
@@ -1865,12 +1974,124 @@
     }
   }
 
-  function saveState() {
+  const UNDO_LIMIT = 50;
+
+  // 撤銷用**整份快照**, 不是 command/inverse.
+  // 理由: inverse 要為每個動作手寫一份, 漏一個就是一個安靜的 bug;
+  // 而 Ruvia 的文件很小(預設約 6KB JSON), 50 份放記憶體裡完全付得起.
+  // 而且掛在 saveState() 上 -- 20 個呼叫點一個都不會漏,
+  // **包含刪整棵樹**(Rec 指定要能撤銷的那一個), 不需要為它另外寫還原邏輯.
+  // 一段連續輸入合併成**一步**撤銷.
+  // key 相同 → 不推新的, 堆疊頂端那份已經是「這段輸入開始之前」的樣子.
+  // 打到標點就把 key 清掉, 下一個字元開新的一段 -- 所以撤銷會回到上一個標點.
+  function saveState(opts) {
     syncHierarchyFiles(app.state);
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(app.state));
+    const next = JSON.stringify(app.state);
+    const key = opts && opts.coalesce ? String(opts.coalesce) : null;
+
+    if (app.lastSaved != null && app.lastSaved !== next) {
+      const merge = key != null && key === app.coalesceKey;
+      if (!merge) {
+        app.undoStack.push(app.lastSaved);
+        if (app.undoStack.length > UNDO_LIMIT) app.undoStack.shift();
+        app.redoStack.length = 0; // 有新動作就沒有「重做」可言了
+      }
+    }
+    app.coalesceKey = key;
+    app.lastSaved = next;
+
+    localStorage.setItem(STORAGE_KEY, next);
+    syncHistoryUi();
   }
 
-  /** 清除本機與 Ruvia 相關的 localStorage（工作區、舊版存檔、主題、縮放） */
+  // ↺ 只在「撤銷過, 而且還沒被新動作作廢」的時候存在.
+  // 用有無取代 disabled 樣式: 沒得重做時它根本不佔位, 也就不會有人按了沒反應.
+  function syncHistoryUi() {
+    document.body.classList.toggle("can-redo", app.redoStack.length > 0);
+  }
+
+  // 標點與換行才切段. **空白不算** -- 空白也切的話等於一個詞一步, 跟一個字一步一樣煩.
+  // CJK 那一段刻意寫成 \u 逃脫: 這一行是功能碼不是文案,
+  // 直接放全形字元會被標點 pre-commit 當成踩線擋下來.
+  const TEXT_BREAK_RE = new RegExp(
+    "[.,;:!?()\\[\\]{}\"'`/\\\\|~\\n" +
+      "\u3002\uff0c\u3001\uff1b\uff1a\uff01\uff1f\u2026\u2014" +
+      "\u300c\u300d\u300e\u300f\uff08\uff09\u300a\u300b\u3010\u3011]"
+  );
+
+  function breaksTextRun(inputEvent, value) {
+    const typed = inputEvent && typeof inputEvent.data === "string" ? inputEvent.data : null;
+    if (typed) return TEXT_BREAK_RE.test(typed);
+    // data 為 null(刪除, 輸入法整段送出等): 看目前結尾那個字元
+    if (typeof value === "string" && value.length) {
+      return TEXT_BREAK_RE.test(value[value.length - 1]);
+    }
+    return false;
+  }
+
+  // 直接寫 localStorage, 繞過 saveState -- 還原本身不該再產生一步撤銷
+  function restoreSnapshot(json) {
+    app.state = JSON.parse(json);
+    app.lastSaved = json;
+    localStorage.setItem(STORAGE_KEY, json);
+
+    // 還原後指標可能指到已經不存在的東西
+    if (app.selectedKnotId && !app.state.knots.some((k) => k.id === app.selectedKnotId)) {
+      app.selectedKnotId = null;
+    }
+    if (!app.state.menus.some((m) => m.id === app.state.ui.activeMenuId)) {
+      app.state.ui.activeMenuId = app.state.menus.length ? app.state.menus[0].id : null;
+    }
+    clearColorPaintMode();
+    syncHistoryUi();
+
+    applyZoom();
+    render();
+  }
+
+  function undo() {
+    if (!app.undoStack.length) return false;
+    const prev = app.undoStack.pop();
+    app.redoStack.push(app.lastSaved);
+    if (app.redoStack.length > UNDO_LIMIT) app.redoStack.shift();
+    restoreSnapshot(prev);
+    return true;
+  }
+
+  function redo() {
+    if (!app.redoStack.length) return false;
+    const next = app.redoStack.pop();
+    app.undoStack.push(app.lastSaved);
+    if (app.undoStack.length > UNDO_LIMIT) app.undoStack.shift();
+    restoreSnapshot(next);
+    return true;
+  }
+
+  function bindUndoHotkeys() {
+    window.addEventListener("keydown", (event) => {
+      if (!(event.metaKey || event.ctrlKey)) return;
+
+      // 焦點在文字欄位時, 交給瀏覽器的原生文字復原 -- 不要搶使用者打字的 undo
+      const el = event.target;
+      if (el && (el.tagName === "TEXTAREA" || el.tagName === "INPUT" || el.isContentEditable)) {
+        return;
+      }
+
+      const key = (event.key || "").toLowerCase();
+      if (key === "z" && !event.shiftKey) {
+        event.preventDefault();
+        undo();
+        return;
+      }
+      // 重做: Cmd/Ctrl+Shift+Z(Mac 與多數創作工具)+ Ctrl+Y(Windows 舊慣例)
+      if ((key === "z" && event.shiftKey) || key === "y") {
+        event.preventDefault();
+        redo();
+      }
+    });
+  }
+
+  /** 清除本機與 Ruvia 相關的 localStorage(工作區, 舊版存檔, 主題, 縮放) */
   function clearRuviaLocalStorage() {
     localStorage.removeItem(STORAGE_KEY);
     localStorage.removeItem(LEGACY_STORAGE_KEY);
@@ -1889,7 +2110,31 @@
     }
   }
 
-  function loadFromImport(raw) {
+  // 2026-08-30: 世界單位 ×2(見 GLOBAL_SCALE 的註解).
+  // 舊檔的座標是現在的一半, 載入時補回來, 否則整棵樹會擠成一團.
+  // 判斷靠 spec 字串, 遷移完就標成新 spec -- **冪等**, 不會被乘兩次.
+  // 沒有 spec 的檔一律當舊檔(那個年代的檔案就是沒有).
+  // width 不必管: setKnotLayout()/normalizeAllLayoutSizes() 每次都會強制蓋成 KNOT_SIZE.width.
+  function migrateWorldUnits(raw) {
+    if (!raw || typeof raw !== "object" || raw.spec === SPEC) return raw;
+
+    const out = structuredClone(raw);
+    const layouts = out && out.ui && out.ui.layout ? out.ui.layout.knots : null;
+    if (layouts && typeof layouts === "object") {
+      for (const id of Object.keys(layouts)) {
+        const l = layouts[id];
+        if (!l || typeof l !== "object") continue;
+        if (Number.isFinite(l.x)) l.x *= 2;
+        if (Number.isFinite(l.y)) l.y *= 2;
+        if (Number.isFinite(l.height)) l.height *= 2;
+      }
+    }
+    out.spec = SPEC;
+    return out;
+  }
+
+  function loadFromImport(rawInput) {
+    const raw = migrateWorldUnits(rawInput);
     if (!raw || typeof raw !== "object") return migrateLegacyState(raw);
     const looksNew =
       raw.spec === SPEC ||
@@ -2164,10 +2409,10 @@
     return row;
   }
 
-  // 刪掉一棵樹。**沒有確認彈窗**（Rec 指定），所以清理必須乾淨且不誤傷：
-  //  · 該樹的畫布 knot／edge 一起刪 —— 留著會變成看不見卻仍會 export 的垃圾
-  //  · tray 的 knot **不刪**，改掛到接手的那棵樹 —— tray 是暫存區，不該跟著某棵樹陪葬
-  //  · deck 不能空：資料模型從 createDefaultState 起就假設至少有一棵
+  // 刪掉一棵樹. **沒有確認彈窗**(Rec 指定), 所以清理必須乾淨且不誤傷:
+  // - 該樹的畫布 knot/edge 一起刪 -- 留著會變成看不見卻仍會 export 的垃圾
+  // - tray 的 knot **不刪**, 改掛到接手的那棵樹 -- tray 是暫存區, 不該跟著某棵樹陪葬
+  // - deck 不能空: 資料模型從 createDefaultState 起就假設至少有一棵
   function deleteMenu(menuId) {
     const idx = app.state.menus.findIndex((m) => m.id === menuId);
     if (idx < 0) return;
@@ -2202,7 +2447,7 @@
       app.state.ui.activeMenuId = app.state.menus[0].id;
     }
 
-    // tray 的 knot 交給接手的那棵樹，才不會變成孤兒
+    // tray 的 knot 交給接手的那棵樹, 才不會變成孤兒
     const heir = getMenuById(app.state, app.state.ui.activeMenuId);
     if (heir) {
       for (const id of trayIds) addKnotToMenuProjection(app.state, heir.id, id);
@@ -2250,7 +2495,7 @@
           render();
         },
         onClick: () => {
-          // 剛剛是拖動換位，不是點選
+          // 剛剛是拖動換位, 不是點選
           if (app.suppressMenuClick) {
             app.suppressMenuClick = false;
             return;
@@ -2276,16 +2521,16 @@
     list.replaceChildren(frag);
   }
 
-  // root 列上下拖動換位。用 pointer 事件（觸控才拖得動，跟 knot 拖曳同一個理由）。
-  // 換位當下就 render()，所以「列在手指底下重排」本身就是回饋 —— 不另外做拖曳樣式或動畫。
-  // ⚠️ 不用 setPointerCapture：render() 會把這一列換掉，capture 跟著失效；掛 window 才穩。
+  // root 列上下拖動換位. 用 pointer 事件(觸控才拖得動, 跟 knot 拖曳同一個理由).
+  // 換位當下就 render(), 所以「列在手指底下重排」本身就是回饋 -- 不另外做拖曳樣式或動畫.
+  // ⚠️ 不用 setPointerCapture: render() 會把這一列換掉, capture 跟著失效; 掛 window 才穩.
   function attachMenuRowReorder(row, menuId) {
     row.addEventListener("pointerdown", (event) => {
       if (event.button !== 0) return;
       if (event.target.closest(".menu-item-edit, .menu-item-delete")) return;
       if (row.classList.contains("is-renaming")) return;
 
-      // 每次按下先清旗標，避免上一輪沒吃到 click 的殘留把下一次正常點選吞掉
+      // 每次按下先清旗標, 避免上一輪沒吃到 click 的殘留把下一次正常點選吞掉
       app.suppressMenuClick = false;
 
       const startY = event.clientY;
@@ -2314,7 +2559,7 @@
 
         const [m] = app.state.menus.splice(from, 1);
         app.state.menus.splice(target, 0, m);
-        saveState();
+        // 拖曳中途只重畫, 不存檔 -- 存了的話一次拖曳會變成好幾步撤銷
         render();
       };
 
@@ -2335,10 +2580,10 @@
     });
   }
 
-  // root deck 的「＋」：無內框、單純一個居中 +。
-  // 寬度用 width:100% 從清單容器繼承 —— **不量任何長度**（Rec 2026-08-30 的要求）。
-  // 沒有做成「預先放一列 opacity:0 再顯示」，因為那一列會是 state 裡的幽靈 menu，
-  // 會跟著 export 進 .root。用 100% 一樣不用量，而且不弄髒資料。
+  // root deck 的「+」: 無內框, 單純一個居中 +.
+  // 寬度用 width:100% 從清單容器繼承 -- **不量任何長度**(Rec 2026-08-30 的要求).
+  // 沒有做成「預先放一列 opacity:0 再顯示」, 因為那一列會是 state 裡的幽靈 menu,
+  // 會跟著 export 進 .root. 用 100% 一樣不用量, 而且不弄髒資料.
   function createAddRootRow() {
     const row = document.createElement("div");
     row.className = "menu-add-row";
@@ -2354,8 +2599,8 @@
       event.preventDefault();
       event.stopPropagation();
 
-      // 名字留空 → 列表顯示既有的 fallback「Untitled tree」，可按 ✐ 改名。
-      // 沒有自訂命名規則：命名是 Rec 拍板的事。
+      // 名字留空 → 列表顯示既有的 fallback「Untitled tree」, 可按 ✐ 改名.
+      // 沒有自訂命名規則: 命名是 Rec 拍板的事.
       const menu = { id: uid("m"), name: "", knotIds: [], edgeIds: [], meta: {} };
       app.state.menus.push(menu);
 
@@ -2433,7 +2678,7 @@
     return String(str).replace(/[\\^$.*+?()[\]{}|]/g, "\\$&");
   }
 
-  /** 顯示名：根層 knot-a … knot-z，用盡後 knot-aa …（內部 id 仍為不透明字串，見 docs/knot-title-vs-id.md） */
+  /** 顯示名: 根層 knot-a ... knot-z, 用盡後 knot-aa ...(內部 id 仍為不透明字串, 見 docs/knot-title-vs-id.md) */
   function nextRootKnotLabel(state) {
     const titles = new Set(state.knots.map((k) => String(k.title || "").trim()));
     for (let i = 0; i < 26; i++) {
@@ -2449,7 +2694,7 @@
     return `knot-x${Date.now().toString(36)}`;
   }
 
-  /** 顯示名：在父標題後加 `-a`、`-b`…（父為 knot-a 則子為 knot-a-a） */
+  /** 顯示名: 在父標題後加 `-a`, `-b`...(父為 knot-a 則子為 knot-a-a) */
   function nextChildKnotLabel(state, parentTitle) {
     const base = String(parentTitle || "").trim();
     if (!base) return nextRootKnotLabel(state);
@@ -2467,7 +2712,7 @@
     return prefix + "z" + Math.floor(Math.random() * 9);
   }
 
-  /** 匯入時依序給 knot-a, knot-b, … */
+  /** 匯入時依序給 knot-a, knot-b, ... */
   function knotLabelForImportIndex(index) {
     const i = Number(index) || 0;
     if (i < 26) return `knot-${String.fromCharCode(97 + i)}`;
@@ -2563,7 +2808,7 @@
     };
   }
 
-  /** 無 localStorage 或 Reset 時：首屏示例樹（knot-a 為樞紐，三叉 + 再長） */
+  /** 無 localStorage 或 Reset 時: 首屏示例樹(knot-a 為樞紐, 三叉 + 再長) */
   function buildShowcaseInitialState() {
     const state = createDefaultState();
     const menu = getActiveMenu(state);
@@ -2571,13 +2816,13 @@
 
     const uiOpen = { contentExpanded: true };
 
-    // 預設注入 ＝ 機器學習入門最常畫的那張圖：「第一個模型該挑哪個」。
-    // 選它的理由：那是真的**樹**（一路問下去分叉），不是清單也不是流程圖 ——
-    // 打開就看得出這個工具是拿來幹嘛的。全英文（Rec 2026-08-30）。
-    // 標題沿用 knot-a / knot-a-a / knot-a-a-a 的階層命名（docs/knot-title-vs-id.md）。
+    // 預設注入 = 機器學習入門最常畫的那張圖: 「第一個模型該挑哪個」.
+    // 選它的理由: 那是真的**樹**(一路問下去分叉), 不是清單也不是流程圖 --
+    // 打開就看得出這個工具是拿來幹嘛的. 全英文(Rec 2026-08-30).
+    // 標題沿用 knot-a / knot-a-a / knot-a-a-a 的階層命名(docs/knot-title-vs-id.md).
     //
-    // ⚠️ 內容只有一份。**桌機與手機分岔的只有座標**，
-    //    knot、edge、title、文字全部相同 —— 所以手機匯出的 .root 在桌機打開仍是同一棵樹。
+    // ⚠️ 內容只有一份. **桌機與手機分岔的只有座標**,
+    //    knot, edge, title, 文字全部相同 -- 所以手機匯出的 .root 在桌機打開仍是同一棵樹.
     const CONTENT = [
       { id: "demo_a",     title: "knot-a",     text: "pick a first model\n\nwhat does the data look like?" },
       { id: "demo_a_a",   title: "knot-a-a",   text: "labeled data\n-> supervised" },
@@ -2589,35 +2834,35 @@
       { id: "demo_a_c",   title: "knot-a-c",   text: "split first\ntrain / val / test" }
     ];
 
-    // 桌機：左→右三欄，橫著長 —— 跟 Ruvia 的 port 方向（左/右）一致。
+    // 桌機: 左→右三欄, 橫著長 -- 跟 Ruvia 的 port 方向(左/右)一致.
     const LAYOUT_WIDE = {
-      demo_a:     { x: 40,  y: 190, width: 164, height: 86 },
-      demo_a_a:   { x: 248, y: 54,  width: 152, height: 54 },
-      demo_a_b:   { x: 248, y: 234, width: 152, height: 54 },
-      demo_a_c:   { x: 248, y: 330, width: 152, height: 54 },
-      demo_a_a_a: { x: 452, y: 10,  width: 190, height: 62 },
-      demo_a_a_b: { x: 452, y: 90,  width: 190, height: 62 },
-      demo_a_b_a: { x: 452, y: 190, width: 190, height: 62 },
-      demo_a_b_b: { x: 452, y: 270, width: 190, height: 62 }
+      demo_a:     { x: 80,  y: 380, width: 328, height: 172 },
+      demo_a_a:   { x: 496, y: 108,  width: 304, height: 108 },
+      demo_a_b:   { x: 496, y: 468, width: 304, height: 108 },
+      demo_a_c:   { x: 496, y: 660, width: 304, height: 108 },
+      demo_a_a_a: { x: 904, y: 20,  width: 380, height: 124 },
+      demo_a_a_b: { x: 904, y: 180,  width: 380, height: 124 },
+      demo_a_b_a: { x: 904, y: 380, width: 380, height: 124 },
+      demo_a_b_b: { x: 904, y: 540, width: 380, height: 124 }
     };
 
-    // 手機：**縮排大綱**（像檔案樹），往下長。
-    // 為什麼不是把桌機那張縮小：knot 一律正規化成 96 世界單位寬，有效 zoom 固定 1.5，
-    // 390px 螢幕只有 260 世界單位可用 —— 兩欄（192＋間距）塞得下，三欄（288）塞不下。
-    // 所以橫向排不開，只能改成每層縮排 56、共用縱軸。手機縱向空間有 519 單位，綽綽有餘。
-    // ⚠️ 順序有講究：`demo_a_c`（split first）排在根的**正下方第一個**。
-    //    Ruvia 的 port 在左右兩側，邊是水平貝茲 —— 子節點在正下方時，線必須繞一大圈。
-    //    根的最後一個子節點離根越遠，那條繞線越長越髒。把最短的那支提前，
-    //    根的最長邊從 362 縮到 270 個世界單位。而且「先切資料」本來就該讀在最前面。
+    // 手機: **縮排大綱**(像檔案樹), 往下長.
+    // 為什麼不是把桌機那張縮小: knot 一律正規化成 96 世界單位寬, 有效 zoom 固定 1.5,
+    // 390px 螢幕只有 260 世界單位可用 -- 兩欄(192+間距)塞得下, 三欄(288)塞不下.
+    // 所以橫向排不開, 只能改成每層縮排 56, 共用縱軸. 手機縱向空間有 519 單位, 綽綽有餘.
+    // ⚠️ 順序有講究: `demo_a_c`(split first)排在根的**正下方第一個**.
+    //    Ruvia 的 port 在左右兩側, 邊是水平貝茲 -- 子節點在正下方時, 線必須繞一大圈.
+    //    根的最後一個子節點離根越遠, 那條繞線越長越髒. 把最短的那支提前,
+    //    根的最長邊從 362 縮到 270 個世界單位. 而且「先切資料」本來就該讀在最前面.
     const LAYOUT_TALL = {
-      demo_a:     { x: 8,   y: 10,  width: 96, height: 51 },
-      demo_a_c:   { x: 64,  y: 76,  width: 96, height: 31 },
-      demo_a_a:   { x: 64,  y: 122, width: 96, height: 31 },
-      demo_a_a_a: { x: 120, y: 168, width: 96, height: 41 },
-      demo_a_a_b: { x: 120, y: 224, width: 96, height: 41 },
-      demo_a_b:   { x: 64,  y: 280, width: 96, height: 31 },
-      demo_a_b_a: { x: 120, y: 326, width: 96, height: 31 },
-      demo_a_b_b: { x: 120, y: 372, width: 96, height: 31 }
+      demo_a:     { x: 16,   y: 20,  width: 192, height: 102 },
+      demo_a_c:   { x: 128,  y: 152,  width: 192, height: 62 },
+      demo_a_a:   { x: 128,  y: 244, width: 192, height: 62 },
+      demo_a_a_a: { x: 240, y: 336, width: 192, height: 82 },
+      demo_a_a_b: { x: 240, y: 448, width: 192, height: 82 },
+      demo_a_b:   { x: 128,  y: 560, width: 192, height: 62 },
+      demo_a_b_a: { x: 240, y: 652, width: 192, height: 62 },
+      demo_a_b_b: { x: 240, y: 744, width: 192, height: 62 }
     };
 
     const layoutTable = isMobileView() ? LAYOUT_TALL : LAYOUT_WIDE;
@@ -2634,7 +2879,7 @@
       setKnotLayout(state, item.id, { ...layoutTable[item.id], zIndex: z++ });
     }
 
-    // 真的分叉：root -> 三支，其中兩支各自再分兩支。
+    // 真的分叉: root -> 三支, 其中兩支各自再分兩支.
     const links = [
       ["demo_a", "demo_a_a"],
       ["demo_a", "demo_a_b"],
@@ -2899,6 +3144,151 @@
     if (!state.ui.activeMenuId || !ids.has(state.ui.activeMenuId)) {
       state.ui.activeMenuId = state.menus[0].id;
     }
+  }
+
+  // -- agent 規範(🤖 按鈕的內容)-----------------------------
+  //
+  // ⚠️ **這段刻意貼在 validateDocument() 正上方. **
+  //    規範與驗證器必須一起改 -- 舊的 `ruvia-ai-tree-schema.md` 就是因為離程式太遠
+  //    而腐爛掉的: 它教 agent 寫 `zone` 和 `width: 132`, 但 setKnotLayout() 會把
+  //    zone 刪掉, 把 width 強制蓋成 96. agent 以為設好了, 其實被靜默丟棄.
+  //
+  // 語氣: 幫助型 -- 除了給契約, 還要**主動教使用者下一步怎麼用**(Rec 2026-08-30).
+  function buildAgentSpecExample() {
+    const doc = {
+      spec: SPEC,
+      document: {
+        id: "doc_1",
+        title: "Example",
+        createdAt: "2026-01-01T00:00:00.000Z",
+        updatedAt: "2026-01-01T00:00:00.000Z",
+        meta: {}
+      },
+      hierarchy: { folders: [{ id: "f1", name: "root", menuIds: ["m1"] }] },
+      menus: [{ id: "m1", name: "My topic", knotIds: ["k1", "k2"], edgeIds: ["e1"], meta: {} }],
+      roots: [],
+      knots: [
+        {
+          id: "k1",
+          title: "knot-a",
+          content: { text: "the question\nor the top idea" },
+          meta: { location: "canvas", ui: { contentExpanded: true } }
+        },
+        {
+          id: "k2",
+          title: "knot-a-a",
+          content: { text: "a branch off it" },
+          meta: { location: "canvas", ui: { contentExpanded: true }, color: "plumbago" }
+        }
+      ],
+      edges: [{ id: "e1", from: "k1", to: "k2", relation: "link", meta: {} }],
+      ui: {
+        activeMenuId: "m1",
+        layout: {
+          knots: {
+            k1: { x: 40, y: 120, width: KNOT_SIZE.width, height: null, zIndex: 1 },
+            k2: { x: 248, y: 120, width: KNOT_SIZE.width, height: null, zIndex: 2 }
+          }
+        }
+      },
+      files: { menuText: "", structureText: "" }
+    };
+    return doc;
+  }
+
+  function buildAgentSpec() {
+    const example = buildAgentSpecExample();
+
+    // 交出去之前先自我驗證: 規範附的範例一定要是真的過得了 import 的.
+    // 以後有人改了資料模型卻忘了改這段, 按下 🤖 當場就會爆.
+    const err = validateDocument(example);
+    if (err) return { ok: false, error: err };
+
+    const colors = RUVIA_COLORS.map((c) => c.name).join(", ");
+
+    const text = [
+      "# Ruvia -- how to write a .root file",
+      "",
+      "Ruvia (ruvia.dev) is a small tree/mind-map tool. A `.root` file is one whole",
+      "Ruvia document, stored as JSON. If you produce a valid one, it imports as a",
+      "brand-new tree, exactly as written.",
+      "",
+      "Please read this whole page before writing anything.",
+      "",
+      "## What you are producing",
+      "",
+      "One JSON object with these top-level keys, all required:",
+      "",
+      "  spec, document, hierarchy, menus, roots, knots, edges, ui, files",
+      "",
+      "- `spec` must be exactly \"" + SPEC + "\".",
+      "- One document = one tree = one entry in `menus`.",
+      "- `menus[0].knotIds` / `.edgeIds` must list every knot / edge in that tree.",
+      "- `ui.activeMenuId` must point at that menu's id.",
+      "",
+      "## The rules that are actually enforced",
+      "",
+      "The importer rejects the file outright if any of these fail:",
+      "",
+      "1. `spec` does not match the string above.",
+      "2. Any duplicate id within knots, edges, menus or roots.",
+      "3. An edge whose `from` or `to` is not an existing knot id.",
+      "4. A `menu.knotIds` / `menu.edgeIds` entry that does not exist.",
+      "5. A `roots[].menuIds` entry that is not an existing menu id.",
+      "6. `ui.activeMenuId` that is not an existing menu id.",
+      "",
+      "## Things that will be silently overwritten -- do not spend effort on them",
+      "",
+      "- `layout.width` -- always forced to " + KNOT_SIZE.width + ". Write it, but you cannot change it.",
+      "- `layout.zone` -- deleted on load. Use `knot.meta.location` instead.",
+      "- `layout.height` -- use `null` and let it size itself to the text.",
+      "",
+      "## Fields worth using",
+      "",
+      "- `knot.title` -- short label. Convention is `knot-a`, then children of it are",
+      "  `knot-a-a`, `knot-a-b`, and their children `knot-a-a-a`. Keep under ~12 chars.",
+      "- `knot.content.text` -- 1-3 short lines. `\\n` for line breaks.",
+      "- `knot.meta.location` -- \"canvas\" (on the board) or \"tray\" (the side holding area).",
+      "- `knot.meta.ui.contentExpanded` -- `true` so the text is visible on load.",
+      "- `knot.meta.color` -- optional, and must be one of these names:",
+      "  " + colors + ".",
+      "- `edge.relation` -- always \"link\".",
+      "",
+      "## Layout",
+      "",
+      "`ui.layout.knots[<knotId>]` must exist for every knot.",
+      "Coordinates are world units; a knot is " + KNOT_SIZE.width + " wide.",
+      "",
+      "- Wide screens: lay the tree left to right. Columns about 208 apart",
+      "  (x = 40, 248, 456...), siblings about 60-80 apart vertically.",
+      "- Narrow screens: lay it as an indented outline going down. Indent each level",
+      "  by about 56 (x = 8, 64, 120...), rows about 46 apart.",
+      "- `zIndex` counts up from 1.",
+      "",
+      "## A complete, valid example",
+      "",
+      "```json",
+      JSON.stringify(example, null, 2),
+      "```",
+      "",
+      "## After you write it -- please tell the user this",
+      "",
+      "Do not just hand over the JSON. Finish your reply with these steps, in your",
+      "own words, so they know what to do with it:",
+      "",
+      "1. Save your JSON to a file whose name ends in `.root` (for example",
+      "   `my-topic.root`). It is plain JSON; the extension is what matters.",
+      "2. Open ruvia.dev.",
+      "3. In the panel on the right, click `import` and choose that file.",
+      "4. It arrives as a new tree. The list at the bottom left is the collection of",
+      "   trees -- click a name to switch, `+` to add an empty one, `✐` to rename,",
+      "   `×` to delete. `×` is undoable with Cmd/Ctrl+Z, or the `↺` button.",
+      "",
+      "If you had to leave anything out, say so plainly rather than inventing fields --",
+      "an unknown field is dropped on import, and the user will not be told."
+    ].join("\n");
+
+    return { ok: true, text };
   }
 
   function validateDocument(doc) {
