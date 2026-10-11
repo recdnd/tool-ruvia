@@ -1182,7 +1182,7 @@ body.tray-collapsed .tray-collapse-btn {
   :root {
     --mb-size: 38px;
     --mb-gap: 8px;
-    --mb-edge: 10px;
+    --mb-edge: 2px;
     --mb-bottom: calc(var(--mb-edge) + env(safe-area-inset-bottom, 0px));
     --mb-btn-bg: rgba(0, 0, 0, 0.1);
   }
